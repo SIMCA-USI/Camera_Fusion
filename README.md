@@ -55,17 +55,14 @@ Para comprobar qué dispositivos de vídeo están disponibles y descartar los no
 ./scripts/calibrate_camera.sh cam_1 /cam_1/image_raw 9x6 0.0404
 ./scripts/calibrate_camera.sh cam_2 /cam_2/image_raw 9x6 0.0404
 ```
-*(Extrae los archivos generados a la carpeta `config` renombrándolos a `cam_1_calibration.yaml` y `cam_2_calibration.yaml`)*
+*(El script moverá y extraerá automáticamente las calibraciones desde `/tmp` a la carpeta `config` como `cam_1_calibration.yaml` y `cam_2_calibration.yaml`)*
 
 **B. Estéreo (Matriz de Homografía):**
 Lanza ambas cámaras (puedes usar el launch file) y ejecuta:
 ```bash
 ./scripts/calibrar_estereo.sh 9x6 0.0404 /cam_1/image_raw /cam_2/image_raw
 ```
-Una vez guardada la calibración, genera el archivo YAML final usando el script de extracción:
-```bash
-python3 ./scripts/extraer_estereo.py
-```
+*(Al finalizar y pulsar SAVE, el script recogerá los datos de `/tmp`, los guardará de forma permanente en `config` y generará automáticamente la Matriz de Homografía sin necesidad de intervención manual).*
 
 ### 3. Ejecución del Sistema
 El sistema completo se levanta mediante un único archivo Launch que orquesta la lectura de cámaras y la fusión de forma sincronizada.
