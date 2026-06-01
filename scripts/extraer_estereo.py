@@ -86,10 +86,9 @@ def extract_stereo_homography():
         
     print(f"✅ ¡Éxito! Matriz de Homografía generada y guardada en:\n📂 {out_yaml}")
 
-    # Limpieza
+    # Limpieza de archivos temporales
     import shutil
     shutil.rmtree(tmp_dir)
-    os.remove(tarball_path)
 
 if __name__ == '__main__':
     extract_stereo_homography()

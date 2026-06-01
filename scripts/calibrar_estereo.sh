@@ -41,6 +41,18 @@ ros2 run camera_calibration cameracalibrator \
     -r left_camera:=/cam_1 \
     -r right_camera:=/cam_2
 
-# Una vez cerrado, ejecutamos el script de extracción en Python
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
-python3 "${SCRIPT_DIR}/extraer_estereo.py"
+# Una vez cerrado, mover el archivo generado a la carpeta config
+CONFIG_DIR="$(pwd)/src/camera_fusion_pkg/config"
+mkdir -p "${CONFIG_DIR}"
+
+if [ -f "/tmp/calibrationdata.tar.gz" ]; then
+    echo "¡Datos de calibración encontrados! Guardando en config..."
+    mv /tmp/calibrationdata.tar.gz "${CONFIG_DIR}/calibrationdataestereo.tar.gz"
+    
+    # Ejecutamos el script de extracción en Python
+    SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+    python3 "${SCRIPT_DIR}/extraer_estereo.py"
+else
+    echo "⚠️ No se encontró el archivo de calibración en /tmp."
+    echo "Asegúrate de haber hecho clic en el botón 'SAVE' antes de cerrar la ventana."
+fi
