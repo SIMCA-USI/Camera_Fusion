@@ -65,10 +65,16 @@ Lanza ambas cámaras (puedes usar el launch file) y ejecuta:
 *(Al finalizar y pulsar SAVE, el script recogerá los datos de `/tmp`, los guardará de forma permanente en `config` y generará automáticamente la Matriz de Homografía sin necesidad de intervención manual).*
 
 ### 3. Ejecución del Sistema
-El sistema completo se levanta mediante un único archivo Launch que orquesta la lectura de cámaras y la fusión de forma sincronizada.
+El sistema se puede levantar en dos modalidades distintas dependiendo de los requisitos de rendimiento y estabilidad temporal. Elige el archivo Launch correspondiente:
 
+**Modo Asíncrono (Recomendado para rendimiento y robustez):**
 ```bash
-ros2 launch camera_fusion_pkg fusion.launch.py
+ros2 launch camera_fusion_pkg fusionasincrona.launch.py
+```
+
+**Modo Síncrono (Recomendado solo si se requiere coherencia de tiempo exacta):**
+```bash
+ros2 launch camera_fusion_pkg fusionsincrona.launch.py
 ```
 El resultado panorámico en tiempo real se publicará en el tópico: `fused_panorama`.
 
@@ -88,4 +94,5 @@ El resultado panorámico en tiempo real se publicará en el tópico: `fused_pano
 * **`extraer_estereo.py`**: Script de post-procesamiento. Abre los tarballs (`.tar.gz`) generados por la GUI de ROS 2, extrae los parámetros estéreo ocultos en `ost.txt`, procesa el álgebra lineal para obtener $H$ y exporta el `board_homography.yaml` limpio para el nodo de fusión.
 
 ### Launch (`launch/`)
-* **`fusion.launch.py`**: Orquestador oficial del paquete. Lanza el lector de cámaras y el motor de fusión simultáneamente, gestionando el ciclo de vida de los nodos.
+* **`fusionasincrona.launch.py`**: Orquestador para el modo de ejecución asíncrono. Lanza el lector de cámaras y el motor de fusión basado en temporizador, optimizado para alto rendimiento y evitar bloqueos por desajustes temporales.
+* **`fusionsincrona.launch.py`**: Orquestador para el modo de ejecución síncrono clásico. Lanza el lector de cámaras y el motor de fusión esperando fotogramas estrictamente pareados por tiempo.
