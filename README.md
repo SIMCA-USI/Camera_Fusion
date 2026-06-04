@@ -48,19 +48,21 @@ Para comprobar qué dispositivos de vídeo están disponibles y descartar los no
 ```
 
 ### 2. Calibración
-*Nota: Si las cámaras no se han calibrado, el nodo de fusión no arrancará para evitar errores de segmentación.*
+*Notas: Si las cámaras no se han calibrado, el nodo de fusión no arrancará para evitar errores de segmentación.*
+*Es importante cambiar el tamaño del tablero y la longitud de los lados de cada cuadrado*
 
 **A. Intrínseca (Por cada cámara):**
 ```bash
-./scripts/calibrate_camera.sh cam_1 /cam_1/image_raw 9x6 0.0404
-./scripts/calibrate_camera.sh cam_2 /cam_2/image_raw 9x6 0.0404
+./scripts/calibrate_camera.sh cam_1 /cam_1/image_raw FilasxColumnas "Tamaño_lado_en_metros"
+./scripts/calibrate_camera.sh cam_2 /cam_2/image_raw FilasxColumnas "Tamaño_lado_en_metros"
 ```
 *(El script moverá y extraerá automáticamente las calibraciones desde `/tmp` a la carpeta `config` como `cam_1_calibration.yaml` y `cam_2_calibration.yaml`)*
 
 **B. Estéreo (Matriz de Homografía):**
+*Nota: Es importante cambiar el tamaño del tablero y la longitud de los lados de cada cuadrado*
 Lanza ambas cámaras (puedes usar el launch file) y ejecuta:
 ```bash
-./scripts/calibrar_estereo.sh 9x6 0.0404 /cam_1/image_raw /cam_2/image_raw
+./scripts/calibrar_estereo.sh FilasxColumnas "Tamaño_lado_en_metros" /cam_1/image_raw /cam_2/image_raw
 ```
 *(Al finalizar y pulsar SAVE, el script recogerá los datos de `/tmp`, los guardará de forma permanente en `config` y generará automáticamente la Matriz de Homografía sin necesidad de intervención manual).*
 
