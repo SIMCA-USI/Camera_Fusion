@@ -77,127 +77,137 @@ Este escalado es **matemáticamente exacto** para un resize puro. No se requiere
 
 ## Despliegue y Ejecución
 
-Sigue estos pasos en orden. Si el repositorio es nuevo para ti, empieza por el paso 1 aunque ya tengas ROS 2 instalado.
+Sigue estos pasos en orden. Si el repositorio es nuevo para ti, empieza por el Paso 1 aunque ya tengas ROS 2 instalado.
 
 ---
 
 ### Paso 1: Requisitos previos
 
-**Sistema operativo y ROS 2**
+**ROS 2**
 
-El paquete es compatible con ROS 2 Humble y ROS 2 Jazzy. Asegurate de tener el entorno configurado:
+El paquete es compatible con ROS 2 Humble y ROS 2 Jazzy. Asegurate de tener el entorno activo en cada terminal que abras:
 
 ```bash
 # Sustituye 'humble' por 'jazzy' si corresponde
 source /opt/ros/humble/setup.bash
 ```
 
-**Dependencias de Python**
+**Dependencias de Python y V4L2**
 
 ```bash
-sudo apt install python3-opencv python3-numpy python3-yaml
-```
-
-**Estructura del espacio de trabajo**
-
-El paquete debe estar dentro de un espacio de trabajo de colcon:
-
-```
-camera_fusion_ws/
-└── src/
-    └── camera_fusion_pkg/   ← contenido de este repositorio
-```
-
-Si acabas de clonar el repositorio, crea el espacio de trabajo y coloca el paquete dentro:
-
-```bash
-mkdir -p ~/camera_fusion_ws/src
-cd ~/camera_fusion_ws/src
-git clone <url-del-repositorio> camera_fusion_pkg
+sudo apt install python3-opencv python3-numpy python3-yaml v4l-utils
 ```
 
 ---
 
-### Paso 2: Compilacion
+### Paso 2: Clonar y compilar
+
+El paquete debe estar dentro de un espacio de trabajo colcon estandar:
+
+```
+ros2_ws/
+└── src/
+    └── camera_fusion_pkg/   ← contenido de este repositorio
+```
+
+Clona el repositorio y compila:
 
 ```bash
-cd ~/camera_fusion_ws
+mkdir -p ~/ros2_ws/src
+cd ~/ros2_ws/src
+git clone <url-del-repositorio> camera_fusion_pkg
+
+cd ~/ros2_ws
 colcon build --packages-select camera_fusion_pkg
 source install/setup.bash
 ```
 
-> Es necesario ejecutar `source install/setup.bash` cada vez que abras una terminal nueva, o añadirlo al fichero `~/.bashrc`.
+> Ejecuta `source install/setup.bash` cada vez que abras una terminal nueva, o añadelo al fichero `~/.bashrc`.
 
 ---
 
 ### Paso 3: Identificar las camaras conectadas
 
-Antes de calibrar o lanzar el sistema, identifica los indices de dispositivo de cada camara USB:
+Antes de calibrar o lanzar el sistema, identifica que dispositivos USB estan disponibles.
+
+Ejecuta el siguiente script **desde la raiz del workspace**:
 
 ```bash
+cd ~/ros2_ws
 ./src/camera_fusion_pkg/scripts/listar_camaras.sh
 ```
 
-El script escanea `/dev/video*` y muestra que dispositivos son camaras validas. Anota el indice de cada camara (por ejemplo, `/dev/video0`, `/dev/video2`).
+El script comprueba todos los `/dev/video*` con `v4l2-ctl` y OpenCV, e indica cuales devuelven imagen valida (`OK`) y cuales son dispositivos de metadatos inutilizables.
+
+Anota el indice de cada camara valida (por ejemplo `/dev/video0` y `/dev/video2`) para usarlo en los pasos siguientes.
 
 ---
 
 ### Paso 4: Calibracion de camaras
 
-La calibracion corrige la distorsion optica de cada lente y calcula la alineacion geometrica entre camaras. Sin calibracion el sistema funciona, pero las imagenes presentaran distorsion y el cosido entre camaras no sera preciso.
+La calibracion corrige la distorsion optica de cada lente y calcula la homografia de alineacion entre camaras adyacentes. Sin calibracion el sistema funciona, pero las imagenes mostraran distorsion de barril y el cosido entre camaras no sera geometricamente preciso.
 
-Los archivos resultantes se guardan en `src/camera_fusion_pkg/config/`.
+Los archivos YAML resultantes se guardan automaticamente en `src/camera_fusion_pkg/config/`.
+
+Necesitas un **tablero de ajedrez impreso** para ambas fases.
+
+---
 
 #### 4.1 Calibracion intrinseca (una vez por camara)
 
-Necesitas un tablero de ajedrez impreso. El script lanza el calibrador de ROS 2 y guarda el resultado automaticamente.
+Este paso mide la distorsion de lente de cada camara de forma independiente. Ejecutalo con las camaras desconectadas del nodo de ROS para que el calibrador acceda directamente al dispositivo.
 
-Parametros del comando: `<nombre_camara> <topico_imagen> <FilasxColumnas> <tamano_cuadrado_metros>`
+Parametros: `<nombre_camara>  <topico_imagen>  <FilasxColumnas>  <tamano_cuadrado_en_metros>`
 
 ```bash
-# Calibrar camara 1
-./src/camera_fusion_pkg/scripts/calibrate_camera.sh \
-    cam_1 /cam_1/image_raw 8x6 0.025
+cd ~/ros2_ws
 
-# Calibrar camara 2
-./src/camera_fusion_pkg/scripts/calibrate_camera.sh \
-    cam_2 /cam_2/image_raw 8x6 0.025
+# Camara 1
+./src/camera_fusion_pkg/scripts/calibrate_camera.sh cam_1 /cam_1/image_raw 8x6 0.025
+
+# Camara 2
+./src/camera_fusion_pkg/scripts/calibrate_camera.sh cam_2 /cam_2/image_raw 8x6 0.025
 ```
 
-El calibrador muestra una ventana en tiempo real. Mueve el tablero lentamente por el campo de vision hasta que la barra de progreso se complete. Entonces hace clic en **CALIBRATE** y despues en **SAVE**. Los archivos `.yaml` se guardaran en `config/`.
+El script lanza el calibrador oficial de ROS 2 con una ventana grafica en tiempo real:
+
+1. Mueve el tablero despacio por todo el campo de vision de la camara hasta que las barras X, Y, Size y Skew se pongan en verde.
+2. Haz clic en **CALIBRATE** (el proceso tarda unos segundos).
+3. Haz clic en **SAVE** y cierra la ventana.
+
+El script recoge el archivo guardado en `/tmp` y lo mueve automaticamente a `config/<nombre_camara>_calibration.yaml`.
+
+---
 
 #### 4.2 Calibracion estereo (homografia de alineacion)
 
-Este paso calcula la rotacion relativa entre las dos camaras y genera la matriz de homografia que el nodo de fusion utiliza para alinear las imagenes.
+Este paso calcula la rotacion relativa entre las dos camaras y a partir de ella genera la matriz de homografia que el nodo de fusion usa para proyectar y alinear las imagenes.
 
-Primero arranca las camaras en una terminal:
-
-```bash
-ros2 launch camera_fusion_pkg fusionasincrona.launch.py
-```
-
-Luego, en otra terminal, ejecuta el calibrador estereo:
+Para esta fase el calibrador necesita suscribirse a los topicos de imagen de ambas camaras. Arranca primero el nodo de captura en una terminal:
 
 ```bash
-./src/camera_fusion_pkg/scripts/calibrar_estereo.sh \
-    8x6 0.025 /cam_1/image_raw /cam_2/image_raw
+cd ~/ros2_ws
+ros2 run camera_fusion_pkg camera_reader_node
 ```
 
-Mueve el tablero de forma que sea visible simultaneamente por ambas camaras. Cuando el calibrador tenga suficientes muestras, haz clic en **SAVE**.
-
-Por ultimo, extrae la homografia del paquete guardado:
+A continuacion, en otra terminal, lanza el calibrador estereo:
 
 ```bash
-python3 ./src/camera_fusion_pkg/scripts/extraer_estereo.py
+cd ~/ros2_ws
+./src/camera_fusion_pkg/scripts/calibrar_estereo.sh 8x6 0.025 /cam_1/image_raw /cam_2/image_raw
 ```
 
-Esto genera `config/board_homography.yaml`, que el nodo de fusion cargara automaticamente al arrancar.
+1. Coloca el tablero en la zona de solapamiento de ambas camaras para que sea visible por las dos simultaneamente.
+2. Muevelo despacio hasta que las barras esten verdes.
+3. Haz clic en **CALIBRATE** y luego en **SAVE**. Cierra la ventana.
+
+Al cerrar, el script procesa automaticamente el paquete guardado, extrae la homografia y genera `config/board_homography.yaml`. No es necesario ejecutar `extraer_estereo.py` manualmente.
 
 ---
 
 ### Paso 5: Lanzar el sistema
 
-Existen tres archivos launch segun el caso de uso:
+Una vez compilado (y con los YAML de calibracion en `config/` si los tienes), lanza el sistema con el archivo launch correspondiente a tu configuracion:
 
 | Launch file | Nodo de fusion | Cuando usarlo |
 |---|---|---|
@@ -205,19 +215,19 @@ Existen tres archivos launch segun el caso de uso:
 | `fusionasincrona.launch.py` | `camera_fusion_async_node` | Solo 2 camaras, procesamiento event-driven sin timer. |
 | `fusionsincrona.launch.py` | `camera_fusion_node` | Solo 2 camaras, modo sincrono con sincronizador de timestamps. Experimental. |
 
-**Opcion recomendada: multicams (N camaras)**
+**Opcion recomendada: N camaras**
 
 ```bash
 ros2 launch camera_fusion_pkg multicams.launch.py
 ```
 
-**Opcion para exactamente 2 camaras (asincrona)**
+**Solo 2 camaras, modo asincrono**
 
 ```bash
 ros2 launch camera_fusion_pkg fusionasincrona.launch.py
 ```
 
-**Opcion para exactamente 2 camaras (sincrona, experimental)**
+**Solo 2 camaras, modo sincrono (experimental)**
 
 ```bash
 ros2 launch camera_fusion_pkg fusionsincrona.launch.py
@@ -227,7 +237,7 @@ ros2 launch camera_fusion_pkg fusionsincrona.launch.py
 
 ### Paso 6: Verificacion
 
-Una vez el sistema este en marcha, comprueba que los topicos se estan publicando correctamente.
+Una vez el sistema esta en marcha, comprueba que los topicos se publican correctamente.
 
 **Topicos disponibles:**
 
@@ -247,19 +257,17 @@ ros2 topic hz /ravo/followme/video_frames
 
 ```bash
 ros2 topic echo /ravo/followme/video_frames --once | grep -E 'height|width'
-# Esperado: height: 640 / width: 640
+# Esperado: height: 640, width: 640
 ```
 
-**Ver la imagen fusionada en RViz:**
+**Ver la imagen fusionada en RViz2:**
 
 ```bash
 rviz2
-# Añadir un display de tipo Image y suscribirlo a /ravo/followme/video_frames
+# Anadir un display de tipo Image y suscribirlo a /ravo/followme/video_frames
 ```
 
 ---
-
-
 
 ## Parámetros configurables
 
