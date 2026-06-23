@@ -75,26 +75,13 @@ Este escalado es **matemáticamente exacto** para un resize puro. No se requiere
 
 ---
 
-## 🚀 Despliegue y Ejecución
+## Despliegue y Ejecución
 
-### 1. Ejecución Rápida (Launch)
-El sistema incluye varios archivos `launch` para facilitar la ejecución. Si no has calibrado las cámaras aún, el sistema usará matrices de identidad y funcionará igualmente sin distorsiones corregidas.
+El proceso de despliegue debe seguir un orden lógico desde la preparación del entorno, la calibración de los dispositivos, hasta la ejecución y verificación del sistema.
 
-**Opción A: Fusión Multi-Cámara (N cámaras, recomendado)**:
-Lanza el sistema escalable y dinámico.
-```bash
-ros2 launch camera_fusion_pkg multicams.launch.py
-```
-
-**Opción B: Fusión Dual (Solo 2 cámaras)**:
-Puedes elegir el modo síncrono o asíncrono (event-driven, más rápido).
-```bash
-ros2 launch camera_fusion_pkg fusion.launch.py mode:=async
-```
-
-### 🛠️ 2. Requisitos y Compilación
-Si acabas de descargar el código, compílalo primero:
-- **Dependencias**: ROS 2 Jazzy / Humble, `python3-opencv`, `python3-numpy`, `python3-yaml`
+### 1. Requisitos y Compilación
+Antes de ejecutar cualquier script, es necesario disponer del entorno ROS 2 (Jazzy o Humble) y compilar el espacio de trabajo.
+Asegúrate de instalar las dependencias de Python: `python3-opencv`, `python3-numpy`, `python3-yaml`.
 
 ```bash
 cd ~/camera_fusion_ws
@@ -102,37 +89,62 @@ colcon build --packages-select camera_fusion_pkg
 source install/setup.bash
 ```
 
-### 🎯 3. Calibración de Cámaras (Opcional pero recomendado)
-> **Nota:** Si no existen los archivos YAML en `config/`, el sistema omitirá este paso. *Importante: al usar los scripts, asegúrate de escribir correctamente las `FilasxColumnas` de tu tablero y el `"Tamaño_lado_en_metros"`.*
+### 2. Funcionamiento de los Scripts y Calibración
+La calibración es fundamental para eliminar distorsiones y alinear las cámaras. Se realiza usando los scripts proporcionados en el directorio `scripts/`.
+Si no existen los archivos YAML en `config/`, el sistema omitirá la calibración y usará matrices de identidad, por lo que las distorsiones no se corregirán.
 
-**A. Intrínseca (una vez por cámara):**
+**Paso 2.1: Identificar las cámaras**
+Usa el script de listado para descubrir qué dispositivos `/dev/video*` están disponibles y son válidos:
 ```bash
-./scripts/calibrate_camera.sh cam_1 /cam_1/image_raw FilasxColumnas "Tamaño_lado_en_metros"
-./scripts/calibrate_camera.sh cam_2 /cam_2/image_raw FilasxColumnas "Tamaño_lado_en_metros"
+./scripts/listar_camaras.sh
 ```
-*(El script guarda automáticamente los `.yaml` en `config/`)*
 
-**B. Estéreo (Homografía de alineación):**
-Abre las cámaras con el script launch y luego en otra terminal ejecuta:
+**Paso 2.2: Calibración Intrínseca**
+Se debe realizar una vez por cámara para corregir la distorsión de la lente. Se requiere indicar las dimensiones del tablero (ej. 8x6) y el tamaño del lado de cada cuadrado en metros (ej. 0.025).
 ```bash
-./scripts/calibrar_estereo.sh FilasxColumnas "Tamaño_lado_en_metros" /cam_1/image_raw /cam_2/image_raw
+./scripts/calibrate_camera.sh cam_1 /cam_1/image_raw 8x6 0.025
+./scripts/calibrate_camera.sh cam_2 /cam_2/image_raw 8x6 0.025
 ```
-*(Haz clic en SAVE para generar `config/board_homography.yaml`)*
+El calibrador guardará automáticamente los archivos de resultados en la carpeta `config/`.
 
-### 🔍 4. Verificación y Tópicos
+**Paso 2.3: Calibración Estéreo (Homografía)**
+Este paso calcula la rotación relativa entre las cámaras y la matriz de homografía.
+Primero, asegúrate de que las cámaras estén publicando imágenes y luego en otra terminal ejecuta:
+```bash
+./scripts/calibrar_estereo.sh 8x6 0.025 /cam_1/image_raw /cam_2/image_raw
+```
+Una vez el calibrador obtenga suficientes muestras, haz clic en el botón SAVE. Posteriormente, se puede usar `extraer_estereo.py` para procesar el paquete guardado y extraer la matriz generada en `config/board_homography.yaml`.
 
-| Topic | Resolución | Descripción |
+### 3. Ejecución del Sistema (Launch)
+Una vez calibradas las cámaras (y generados los YAML en `config/`), se puede lanzar el sistema principal de fusión.
+
+**Opción A: Fusión Multi-Cámara (N cámaras, recomendado)**
+Lanza el sistema escalable dinámico para múltiples cámaras:
+```bash
+ros2 launch camera_fusion_pkg multicams.launch.py
+```
+
+**Opción B: Fusión Dual (Solo 2 cámaras)**
+Lanza el modo asíncrono optimizado para una configuración estricta de dos cámaras:
+```bash
+ros2 launch camera_fusion_pkg fusion.launch.py mode:=async
+```
+
+### 4. Verificación y Tópicos
+Comprueba que los tópicos se están publicando correctamente y que el ancho de banda y resolución son correctos.
+
+| Tópico | Resolución | Descripción |
 |---|---|---|
-| `/autobus/camaras/cam_1/image_raw` | 640×640 | Stream cámara 1 (sin fusión) |
-| `/autobus/camaras/cam_2/image_raw` | 640×640 | Stream cámara 2 (sin fusión) |
-| `/ravo/followme/video_frames` | 640×640 | Vista panorámica fusionada |
+| `/autobus/camaras/cam_1/image_raw` | 640x640 | Stream cámara 1 (sin fusión) |
+| `/autobus/camaras/cam_2/image_raw` | 640x640 | Stream cámara 2 (sin fusión) |
+| `/ravo/followme/video_frames` | 640x640 | Vista panorámica fusionada |
 
 **Comandos útiles de comprobación:**
 ```bash
-# FPS del resultado fusionado (objetivo: ≥15 Hz)
+# FPS del resultado fusionado (objetivo: >=15 Hz)
 ros2 topic hz /ravo/followme/video_frames
 
-# Comprobar resolución de salida (Esperado → height: 640, width: 640)
+# Comprobar resolución de salida (Esperado: height 640, width 640)
 ros2 topic echo /ravo/followme/video_frames --once | grep -E 'height|width'
 ```
 
