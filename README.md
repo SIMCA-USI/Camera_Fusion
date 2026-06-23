@@ -75,14 +75,26 @@ Este escalado es **matemáticamente exacto** para un resize puro. No se requiere
 
 ---
 
-## Despliegue
+## 🚀 Despliegue y Ejecución
 
-### Requisitos
+### 1. Ejecución Rápida (Launch)
+El sistema incluye varios archivos `launch` para facilitar la ejecución. Si no has calibrado las cámaras aún, el sistema usará matrices de identidad y funcionará igualmente sin distorsiones corregidas.
 
-- ROS 2 Jazzy / Humble
-- `python3-opencv`, `python3-numpy`, `python3-yaml`
+**Opción A: Fusión Multi-Cámara (N cámaras, recomendado)**:
+Lanza el sistema escalable y dinámico.
+```bash
+ros2 launch camera_fusion_pkg multicams.launch.py
+```
 
-### 1. Compilación
+**Opción B: Fusión Dual (Solo 2 cámaras)**:
+Puedes elegir el modo síncrono o asíncrono (event-driven, más rápido).
+```bash
+ros2 launch camera_fusion_pkg fusion.launch.py mode:=async
+```
+
+### 🛠️ 2. Requisitos y Compilación
+Si acabas de descargar el código, compílalo primero:
+- **Dependencias**: ROS 2 Jazzy / Humble, `python3-opencv`, `python3-numpy`, `python3-yaml`
 
 ```bash
 cd ~/camera_fusion_ws
@@ -90,32 +102,24 @@ colcon build --packages-select camera_fusion_pkg
 source install/setup.bash
 ```
 
-### 2. Calibración
-
-> **Nota:** si no existen los ficheros `config/cam_X_calibration.yaml` y `config/board_homography.yaml`, el nodo de fusión usará matrices identidad (sin corrección de lente).
-
-*Nota: Es importante cambiar el tamaño del tablero y la longitud de los lados de cada cuadrado al calibrar.*
+### 🎯 3. Calibración de Cámaras (Opcional pero recomendado)
+> **Nota:** Si no existen los archivos YAML en `config/`, el sistema omitirá este paso. *Importante: al usar los scripts, asegúrate de escribir correctamente las `FilasxColumnas` de tu tablero y el `"Tamaño_lado_en_metros"`.*
 
 **A. Intrínseca (una vez por cámara):**
 ```bash
 ./scripts/calibrate_camera.sh cam_1 /cam_1/image_raw FilasxColumnas "Tamaño_lado_en_metros"
 ./scripts/calibrate_camera.sh cam_2 /cam_2/image_raw FilasxColumnas "Tamaño_lado_en_metros"
 ```
-El script extrae automáticamente los `.yaml` a `config/`.
+*(El script guarda automáticamente los `.yaml` en `config/`)*
 
 **B. Estéreo (Homografía de alineación):**
-*Nota: Es importante cambiar el tamaño del tablero y la longitud de los lados de cada cuadrado*
-Lanza ambas cámaras (puedes usar el launch file) y ejecuta:
+Abre las cámaras con el script launch y luego en otra terminal ejecuta:
 ```bash
 ./scripts/calibrar_estereo.sh FilasxColumnas "Tamaño_lado_en_metros" /cam_1/image_raw /cam_2/image_raw
 ```
-Al pulsar SAVE, el script genera `config/board_homography.yaml` automáticamente.
+*(Haz clic en SAVE para generar `config/board_homography.yaml`)*
 
-### 3. Ejecución
-
-```bash
-ros2 launch camera_fusion_pkg multicams.launch.py
-```
+### 🔍 4. Verificación y Tópicos
 
 | Topic | Resolución | Descripción |
 |---|---|---|
@@ -123,15 +127,13 @@ ros2 launch camera_fusion_pkg multicams.launch.py
 | `/autobus/camaras/cam_2/image_raw` | 640×640 | Stream cámara 2 (sin fusión) |
 | `/ravo/followme/video_frames` | 640×640 | Vista panorámica fusionada |
 
-### 4. Verificación
-
+**Comandos útiles de comprobación:**
 ```bash
 # FPS del resultado fusionado (objetivo: ≥15 Hz)
 ros2 topic hz /ravo/followme/video_frames
 
-# Comprobar resolución de salida
+# Comprobar resolución de salida (Esperado → height: 640, width: 640)
 ros2 topic echo /ravo/followme/video_frames --once | grep -E 'height|width'
-# Esperado → height: 640, width: 640
 ```
 
 ---
