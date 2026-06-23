@@ -91,10 +91,10 @@ source install/setup.bash
 ```
 
 ### 2. Calibración
-*Notas: Si las cámaras no se han calibrado, el nodo de fusión no arrancará para evitar errores de segmentación.*
-*Es importante cambiar el tamaño del tablero y la longitud de los lados de cada cuadrado*
 
 > **Nota:** si no existen los ficheros `config/cam_X_calibration.yaml` y `config/board_homography.yaml`, el nodo de fusión usará matrices identidad (sin corrección de lente).
+
+*Nota: Es importante cambiar el tamaño del tablero y la longitud de los lados de cada cuadrado al calibrar.*
 
 **A. Intrínseca (una vez por cámara):**
 ```bash
