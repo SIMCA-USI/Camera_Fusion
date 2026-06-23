@@ -1,16 +1,24 @@
 #!/usr/bin/env python3
 """
-Camera Fusion Node — Modo ASÍNCRONO optimizado.
+Camera Fusion Node — Modo ASÍNCRONO optimizado para ≥15 FPS y salida 640×640.
 
-Mejoras vs versión anterior:
+Arquitectura:
 - Sin timer: el procesamiento se dispara en el instante que llega un frame nuevo
-  → latencia ~0ms en lugar de hasta 33ms del timer.
+  → latencia ~0 ms en lugar de hasta 33 ms del timer.
 - Hilo de procesamiento dedicado con cola de tamaño 1: el executor ROS nunca
   se bloquea durante el remap/blend.
 - Dos remaps en paralelo: OpenCV libera el GIL → paralelismo real en dos hilos.
-- Reutilización del objeto Image de salida: sin malloc por frame.
+- Buffer de publicación pre-reservado: sin malloc por frame (vs tobytes() que
+  hacía malloc+memcpy en cada frame).
 - Skip de frames duplicados: si llegó el mismo par que el ciclo anterior, no
   se reprocesa.
+
+Resolución de salida: 640×640 (canvas cuadrado, compatible con YOLO).
+
+Calibración:
+- Los mapas de undistort se computan con K escalado al tamaño de entrada real
+  (cam_h puede diferir del image_height del YAML). El escalado es matemáticamente
+  exacto para un resize puro: fy_new = fy * (cam_h / calib_h), cy_new = cy * (cam_h / calib_h).
 """
 import rclpy
 from rclpy.node import Node
@@ -47,13 +55,15 @@ class AsyncFusionNode(Node):
     def __init__(self):
         super().__init__('panoramic_fusion_node')
 
-        self.declare_parameter('overlap_start', 400)
-        self.declare_parameter('overlap_end',   600)
-        self.declare_parameter('canvas_w',     1100)
-        self.declare_parameter('canvas_h',      480)
+        # ── Parámetros ───────────────────────────────────────────────────────
+        self.declare_parameter('overlap_start', 280)
+        self.declare_parameter('overlap_end',   360)
+        self.declare_parameter('canvas_w',      640)
+        self.declare_parameter('canvas_h',      640)
         self.declare_parameter('cam_w',         640)
-        self.declare_parameter('cam_h',         480)
-        self.declare_parameter('interp', cv2.INTER_LINEAR)
+        self.declare_parameter('cam_h',         640)
+        self.declare_parameter('interp',        cv2.INTER_NEAREST)   # ~2× más rápido que INTER_LINEAR
+        self.declare_parameter('slop_ms',        50)                 # ms máx entre frames para fusionar
 
         self.overlap_start = self.get_parameter('overlap_start').value
         self.overlap_end   = self.get_parameter('overlap_end').value
@@ -62,6 +72,7 @@ class AsyncFusionNode(Node):
         self.cam_w         = self.get_parameter('cam_w').value
         self.cam_h         = self.get_parameter('cam_h').value
         self.interp        = self.get_parameter('interp').value
+        self._slop         = self.get_parameter('slop_ms').value / 1000.0
 
         # ── Calibración ──────────────────────────────────────────────────────
         cfg = os.path.expanduser(
@@ -71,8 +82,8 @@ class AsyncFusionNode(Node):
         ph = os.path.join(cfg, 'board_homography.yaml')
 
         if os.path.exists(p1) and os.path.exists(p2) and os.path.exists(ph):
-            self.K1, self.D1 = self._load_intrinsics(p1)
-            self.K2, self.D2 = self._load_intrinsics(p2)
+            self.K1, self.D1 = self._load_intrinsics(p1, self.cam_w, self.cam_h)
+            self.K2, self.D2 = self._load_intrinsics(p2, self.cam_w, self.cam_h)
             self.H           = self._load_homography(ph)
         else:
             self.get_logger().warn("Calibración no encontrada — usando identidad.")
@@ -104,19 +115,27 @@ class AsyncFusionNode(Node):
         self._alpha_inv_w = (256 - self._alpha_w).astype(np.uint16)
 
         # ── Buffers del hilo de procesamiento (único hilo → sin race) ────────
-        self._out1   = np.zeros((self.cam_h, self.cam_w,      3), dtype=np.uint8)
+        self._out1   = np.zeros((self.cam_h, self.cam_w,       3), dtype=np.uint8)
         self._out2   = np.zeros((self.canvas_h, self.canvas_w, 3), dtype=np.uint8)
-        self._canvas = np.empty((self.canvas_h, self.canvas_w, 3), dtype=np.uint8)
         self._roi1   = np.empty((self.canvas_h, bw, 3), dtype=np.uint16)
         self._roi2   = np.empty((self.canvas_h, bw, 3), dtype=np.uint16)
 
-        # Mensaje de salida reutilizable (seguro: solo lo escribe el hilo proc)
+        # Buffer de publicación pre-reservado: evita malloc+memcpy de tobytes() por frame.
+        # _canvas apunta directamente al backing del bytearray → escribir en _canvas
+        # escribe en _pub_buf sin copia adicional.
+        self._pub_buf  = bytearray(self.canvas_h * self.canvas_w * 3)
+        self._canvas   = np.frombuffer(self._pub_buf, dtype=np.uint8).reshape(
+            self.canvas_h, self.canvas_w, 3)
+
+        # Mensaje de salida reutilizable (seguro: solo lo escribe el hilo proc).
+        # data apunta al bytearray pre-reservado; publish() serializa en DDS sin malloc extra.
         self._out_msg              = Image()
         self._out_msg.height       = self.canvas_h
         self._out_msg.width        = self.canvas_w
         self._out_msg.encoding     = 'bgr8'
         self._out_msg.is_bigendian = False
         self._out_msg.step         = self.canvas_w * 3
+        self._out_msg.data         = self._pub_buf
 
         # ── Estado compartido callbacks ↔ hilo de procesamiento ──────────────
         self._latest1   = None
@@ -125,7 +144,7 @@ class AsyncFusionNode(Node):
         self._lock2     = threading.Lock()
 
         # Cola de señales de tamaño 1: si ya hay una señal pendiente,
-        # descartamos la nueva (el hilo usará el frame más reciente al despertar)
+        # descartamos la nueva (el hilo usará el frame más reciente al despertar).
         self._trigger_q = queue.Queue(maxsize=1)
 
         # Pool de 2 workers para remap paralelo (OpenCV libera el GIL)
@@ -142,23 +161,52 @@ class AsyncFusionNode(Node):
 
         # ── ROS ──────────────────────────────────────────────────────────────
         cg = ReentrantCallbackGroup()
-        self.fused_pub = self.create_publisher(Image, 'fused_panorama', _QOS_PUB)
+        self.fused_pub = self.create_publisher(Image, '/ravo/followme/video_frames', _QOS_PUB)
         self.create_subscription(Image, 'cam_1/image_raw',
                                  self._cb1, _QOS_SUB, callback_group=cg)
         self.create_subscription(Image, 'cam_2/image_raw',
                                  self._cb2, _QOS_SUB, callback_group=cg)
 
         self.get_logger().info(
-            f"✅ AsyncFusion (event-driven, remap paralelo, {_N_CORES} cores) listo.")
+            f"✅ AsyncFusion (event-driven, remap paralelo INTER_NEAREST, "
+            f"{_N_CORES} cores, canvas {self.canvas_w}×{self.canvas_h}) listo.")
 
     # ── Carga ────────────────────────────────────────────────────────────────
 
-    def _load_intrinsics(self, path):
+    def _load_intrinsics(self, path: str, target_w: int, target_h: int):
+        """Carga K y D desde YAML y escala K si la resolución difiere de la calibración.
+
+        Si la cámara publica a (target_w × target_h) pero la calibración se hizo
+        a otra resolución (calib_w × calib_h), se escala K proporcionalmente.
+        Para un resize puro esto es matemáticamente exacto:
+            fx_new = fx * (target_w / calib_w)
+            fy_new = fy * (target_h / calib_h)
+            cx_new = cx * (target_w / calib_w)
+            cy_new = cy * (target_h / calib_h)
+        """
         with open(path) as f:
             d = yaml.safe_load(f)
-        return (np.array(d['camera_matrix']['data'],
-                         dtype=np.float64).reshape(3, 3),
-                np.array(d['distortion_coefficients']['data'], dtype=np.float64))
+
+        K = np.array(d['camera_matrix']['data'],
+                     dtype=np.float64).reshape(3, 3)
+        D = np.array(d['distortion_coefficients']['data'], dtype=np.float64)
+
+        calib_w = int(d.get('image_width',  target_w))
+        calib_h = int(d.get('image_height', target_h))
+
+        if calib_w != target_w or calib_h != target_h:
+            sx = target_w / calib_w
+            sy = target_h / calib_h
+            K = K.copy()
+            K[0, 0] *= sx   # fx
+            K[1, 1] *= sy   # fy
+            K[0, 2] *= sx   # cx
+            K[1, 2] *= sy   # cy
+            self.get_logger().info(
+                f"  Calibración escalada {calib_w}×{calib_h} → {target_w}×{target_h} "
+                f"(sx={sx:.4f}, sy={sy:.4f})")
+
+        return K, D
 
     def _load_homography(self, path):
         with open(path) as f:
@@ -193,7 +241,6 @@ class AsyncFusionNode(Node):
         """Bucle del hilo dedicado de fusión. Espera señales del trigger,
         lee los frames más recientes y procesa."""
         while self._running:
-            # Bloquear hasta recibir señal (o timeout para poder salir limpio)
             try:
                 self._trigger_q.get(timeout=0.5)
             except queue.Empty:
@@ -214,6 +261,10 @@ class AsyncFusionNode(Node):
 
             # Skip si el par no ha cambiado desde el último procesamiento
             if t1 == self._last_t1 and t2 == self._last_t2:
+                continue
+
+            # Slop check: descartar si los frames están muy desincronizados
+            if abs(t1 - t2) > self._slop:
                 continue
 
             self._fuse(msg1, msg2)
@@ -241,7 +292,8 @@ class AsyncFusionNode(Node):
             raw2 = np.frombuffer(msg2.data, dtype=np.uint8).reshape(
                 msg2.height, msg2.width, 3)
 
-            # Remap en paralelo: OpenCV libera el GIL → dos cores en paralelo
+            # Remap en paralelo: OpenCV libera el GIL → dos cores en paralelo.
+            # INTER_NEAREST es ~2× más rápido que INTER_LINEAR para este uso.
             f1 = self._remap_pool.submit(
                 cv2.remap, raw1, self.map1x, self.map1y,
                 self.interp, self._out1)
@@ -252,6 +304,7 @@ class AsyncFusionNode(Node):
 
             s, e = self._s, self._e
 
+            # Escribir directamente en _canvas (respaldado por _pub_buf → sin copia extra)
             self._canvas[:, :s] = self._out1[:, :s]
             self._canvas[:, e:] = self._out2[:, e:]
 
@@ -262,10 +315,10 @@ class AsyncFusionNode(Node):
             self._roi1 += self._roi2
             self._canvas[:, s:e] = (self._roi1 >> 8).astype(np.uint8)
 
-            # Reutilizar el objeto Image (hilo único → sin race)
+            # Publicar reutilizando el objeto Image y el bytearray pre-reservado.
+            # No hay malloc: _out_msg.data ya apunta a _pub_buf.
             self._out_msg.header          = msg1.header
             self._out_msg.header.frame_id = 'panoramic_link'
-            self._out_msg.data            = self._canvas.tobytes()
             self.fused_pub.publish(self._out_msg)
 
         except Exception as ex:

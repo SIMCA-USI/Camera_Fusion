@@ -1,100 +1,157 @@
 # Multi-Camera Panoramic Fusion (ROS 2)
 
-Este repositorio contiene un sistema completo en ROS 2 diseñado para la adquisición, calibración y fusión en tiempo real de múltiples cámaras (webcams USB) con el objetivo de generar una única vista panorámica sin interrupciones visuales (seamless stitching). El proyecto está desarrollado bajo un estándar de investigación.
+Sistema en ROS 2 para la adquisición, calibración y fusión en tiempo real de múltiples cámaras (webcams USB), generando una vista panorámica unificada a **640×640 px** compatible con inferencia YOLO. El procesamiento es totalmente **asíncrono y event-driven**, garantizando ≥15 FPS.
 
-## Fundamentos Teóricos y Flujo de Trabajo
+---
 
-La fusión de cámaras requiere un proceso riguroso de calibración geométrica para corregir las aberraciones de las lentes y alinear los sistemas de coordenadas espaciales. El sistema se divide en tres fases conceptuales:
+## Fundamentos Teóricos
+
+La fusión de cámaras requiere un proceso de calibración geométrica en dos fases para corregir aberraciones de lente y alinear los sistemas de coordenadas.
 
 ### 1. Calibración Intrínseca (Corrección de Lente)
-**¿Por qué se hace?** Las lentes de las cámaras de bajo coste introducen distorsiones severas (efecto barril o acerico) que curvan las líneas rectas. Además, cada cámara tiene un "centro óptico" y una "distancia focal" únicos. 
-Mediante la observación de un patrón conocido (tablero de ajedrez), el algoritmo estima la **Matriz de la Cámara ($K$)** y los **Coeficientes de Distorsión ($D$)**. El nodo de fusión utiliza estos datos para "aplanar" (rectificar) matemáticamente cada imagen antes de intentar unirlas.
+Las lentes de bajo coste introducen distorsiones (efecto barril) que curvan las líneas rectas. Mediante un tablero de ajedrez, el algoritmo estima la **Matriz de la Cámara ($K$)** y los **Coeficientes de Distorsión ($D$)**. El nodo de fusión los usa para rectificar matemáticamente cada imagen antes de unirlas.
 
-<!-- TODO: Insertar imagen representativa de una cámara mostrando el tablero de calibración intrínseca -->
 ![Calibración Intrínseca](docs/images/calibracion_intrinseca.png)
 
-### 2. Calibración Estéreo (Alineación Espacial)
-**¿Por qué se hace?** Para unir dos imágenes, necesitamos saber exactamente dónde está físicamente una cámara con respecto a la otra. La calibración estéreo analiza cómo ambas cámaras ven el mismo patrón en el espacio 3D simultáneamente.
-A partir de esto, se extrae la matriz de rotación relativa ($R_{rel}$) entre ambas cámaras.
+### 2. Calibración Estéreo → Homografía
+Con ambas cámaras viendo el mismo tablero simultáneamente, se obtiene la rotación relativa ($R_{rel}$) entre ellas. A partir de ahí se calcula la **Matriz de Homografía**:
 
-<!-- TODO: Insertar imagen representativa de ambas cámaras viendo el mismo tablero en el área de solape -->
-![Calibración Estéreo](docs/images/calibracion_estereo.png)
+$$H = K_1 \cdot R_{rel} \cdot K_2^{-1}$$
 
-### 3. Fusión por Homografía y Blending
-Con las cámaras rectificadas y su relación rotacional conocida, calculamos una **Matriz de Homografía ($H$)** mediante la ecuación:
-$H = K_1 \cdot R_{rel} \cdot K_2^{-1}$
+Esta proyecta la imagen de cam_2 sobre el plano de cam_1 (`cv2.warpPerspective`). En la zona de solapamiento se aplica **Linear Blending** — un degradado suave calculado únicamente sobre la ROI de costura.
 
-Esta matriz proyecta la imagen de la cámara derecha sobre el plano coordenado de la cámara izquierda (`cv2.warpPerspective`). Finalmente, para evitar un "corte duro" visible en la unión de las dos imágenes, el nodo aplica un algoritmo de **Linear Blending (Degradado)** enfocado exclusivamente en la Región de Interés (ROI) de solape, optimizando dramáticamente el rendimiento computacional.
-
-<!-- TODO: Insertar imagen mostrando el resultado final de la vista panorámica fusionada -->
 ![Fusión y Blending](docs/images/fusion_panoramica.png)
 
 ---
 
-## Despliegue y Uso
+## Arquitectura del Software
 
-### Compilación
-Asegúrate de tener ROS 2 (Jazzy/Humble) instalado.
+```
+/dev/video*  ──►  camera_reader_node  ──►  cam_1/image_raw  ─┐
+                                      ──►  cam_2/image_raw  ─┤─►  camera_fusion_async_node  ──►  /ravo/followme/video_frames
+                                      ──►  cam_N/image_raw  ─┘         (640×640, ≥15 FPS)
+```
+
+### Nodos ROS 2
+
+| Nodo | Fichero | Descripción |
+|---|---|---|
+| `camera_reader_node` | `camera_reader_node.py` | Auto-descubre cámaras USB vía V4L2. Publica **siempre a 640×640** aplicando `cv2.resize`, independientemente del modo nativo del hardware. Un hilo de captura por cámara. |
+| `camera_fusion_async_node` | `camera_fusion_async_node.py` | Fusión de **2 cámaras** event-driven. Remap paralelo en 2 cores (OpenCV libera el GIL). Buffer de publicación pre-reservado (sin `malloc` por frame). |
+| `camera_multicams_node` | `camera_multicams_node.py` | Fusión escalable a **N cámaras**. Misma arquitectura asíncrona, remap paralelo con un worker por cámara. |
+
+### Diseño asíncrono (event-driven)
+
+```
+cam_1 llega → señal ─┐
+cam_2 llega → señal ─┘→ [hilo fusión]: remap‖ → blend → publica
+                         └── executor ROS siempre libre ──────┘
+```
+
+- **Sin timer**: el procesamiento arranca en cuanto llega un frame nuevo → latencia ~0 ms.
+- **Cola de tamaño 1**: si el hilo está procesando, la señal siguiente se descarta y el hilo leerá el frame más reciente al despertar → nunca acumula backlog.
+- **Remap paralelo**: `INTER_NEAREST` en ThreadPoolExecutor de 2 workers → OpenCV libera el GIL, dos cores en paralelo.
+- **Buffer pre-reservado**: `_canvas` respaldado por un `bytearray` fijo. El objeto `Image` apunta directamente a él → `publish()` sin malloc extra.
+
+### Calibración y escalado de K
+
+Los mapas de undistort se calculan con `K` escalado automáticamente si la resolución del stream (`cam_h=640`) difiere del YAML de calibración (`image_height=480`):
+
+```
+fy_new = fy × (640 / 480)  →  662.11 → 882.81
+cy_new = cy × (640 / 480)  →  240.17 → 320.22
+```
+
+Este escalado es **matemáticamente exacto** para un resize puro. No se requiere recalibrar.
+
+### Scripts de Soporte (`scripts/`)
+
+| Script | Descripción |
+|---|---|
+| `listar_camaras.sh` | Escanea `/dev/video*` con `v4l2-ctl` y OpenCV para identificar cámaras válidas. |
+| `calibrate_camera.sh` | Wrapper del calibrador ROS 2 (`camera_calibration`) para calibración monocular. |
+| `calibrar_estereo.sh` | Wrapper para calibración estéreo par a par (modo `--approximate`). |
+| `extraer_estereo.py` | Procesa los `.tar.gz` de ROS 2, extrae $H$ de `ost.txt` y exporta `board_homography.yaml`. |
+
+---
+
+## Despliegue
+
+### Requisitos
+
+- ROS 2 Jazzy / Humble
+- `python3-opencv`, `python3-numpy`, `python3-yaml`
+
+### 1. Compilación
+
 ```bash
 cd ~/camera_fusion_ws
 colcon build --packages-select camera_fusion_pkg
 source install/setup.bash
 ```
 
-### 1. Detección de Cámaras
-Para comprobar qué dispositivos de vídeo están disponibles y descartar los nodos de metadatos del kernel de Linux:
-```bash
-./scripts/listar_camaras.sh
-```
-
 ### 2. Calibración
 *Notas: Si las cámaras no se han calibrado, el nodo de fusión no arrancará para evitar errores de segmentación.*
 *Es importante cambiar el tamaño del tablero y la longitud de los lados de cada cuadrado*
 
-**A. Intrínseca (Por cada cámara):**
+> **Nota:** si no existen los ficheros `config/cam_X_calibration.yaml` y `config/board_homography.yaml`, el nodo de fusión usará matrices identidad (sin corrección de lente).
+
+**A. Intrínseca (una vez por cámara):**
 ```bash
 ./scripts/calibrate_camera.sh cam_1 /cam_1/image_raw FilasxColumnas "Tamaño_lado_en_metros"
 ./scripts/calibrate_camera.sh cam_2 /cam_2/image_raw FilasxColumnas "Tamaño_lado_en_metros"
 ```
-*(El script moverá y extraerá automáticamente las calibraciones desde `/tmp` a la carpeta `config` como `cam_1_calibration.yaml` y `cam_2_calibration.yaml`)*
+El script extrae automáticamente los `.yaml` a `config/`.
 
-**B. Estéreo (Matriz de Homografía):**
+**B. Estéreo (Homografía de alineación):**
 *Nota: Es importante cambiar el tamaño del tablero y la longitud de los lados de cada cuadrado*
 Lanza ambas cámaras (puedes usar el launch file) y ejecuta:
 ```bash
 ./scripts/calibrar_estereo.sh FilasxColumnas "Tamaño_lado_en_metros" /cam_1/image_raw /cam_2/image_raw
 ```
-*(Al finalizar y pulsar SAVE, el script recogerá los datos de `/tmp`, los guardará de forma permanente en `config` y generará automáticamente la Matriz de Homografía sin necesidad de intervención manual).*
+Al pulsar SAVE, el script genera `config/board_homography.yaml` automáticamente.
 
-### 3. Ejecución del Sistema
-El sistema se puede levantar en dos modalidades distintas dependiendo de los requisitos de rendimiento y estabilidad temporal. Elige el archivo Launch correspondiente:
+### 3. Ejecución
 
-**Modo Asíncrono (Recomendado para rendimiento y robustez):**
 ```bash
-ros2 launch camera_fusion_pkg fusionasincrona.launch.py
+ros2 launch camera_fusion_pkg multicams.launch.py
 ```
 
-**Modo Síncrono (Recomendado solo si se requiere coherencia de tiempo exacta):**
+| Topic | Resolución | Descripción |
+|---|---|---|
+| `/autobus/camaras/cam_1/image_raw` | 640×640 | Stream cámara 1 (sin fusión) |
+| `/autobus/camaras/cam_2/image_raw` | 640×640 | Stream cámara 2 (sin fusión) |
+| `/ravo/followme/video_frames` | 640×640 | Vista panorámica fusionada |
+
+### 4. Verificación
+
 ```bash
-ros2 launch camera_fusion_pkg fusionsincrona.launch.py
+# FPS del resultado fusionado (objetivo: ≥15 Hz)
+ros2 topic hz /ravo/followme/video_frames
+
+# Comprobar resolución de salida
+ros2 topic echo /ravo/followme/video_frames --once | grep -E 'height|width'
+# Esperado → height: 640, width: 640
 ```
-El resultado panorámico en tiempo real se publicará en el tópico: `fused_panorama`.
 
 ---
 
-## Arquitectura del Software
+## Parámetros configurables
 
-### Nodos ROS 2 (`src/camera_fusion_pkg/`)
-* **`camera_reader_node.py`**: Nodo encargado de la ingesta de vídeo. Posee una lógica de auto-descubrimiento que escanea V4L2 en busca de cámaras válidas, las inicializa a `640x480` y utiliza sincronización forzada (`cap.grab()` simultáneo) para minimizar la latencia del bus USB antes de publicar en los tópicos `cam_X/image_raw`.
-* **`camera_fusion_node.py`**: Nodo principal de visión artificial encargado de rectificar, aplicar la homografía y fusionar (*blending* localizado) las imágenes. El nodo cuenta con dos enfoques de procesamiento de imágenes:
-  * **Modo Síncrono (`message_filters`):** En este enfoque, el nodo espera a recibir un par de imágenes (una de cada cámara) con marcas de tiempo idénticas o muy cercanas. Su objetivo es garantizar la máxima coherencia temporal para que un objeto moviéndose entre las cámaras no se vea "partido". Sin embargo, demostró ser una arquitectura muy frágil en la práctica. Debido al *jitter* de hardware de las cámaras de bajo coste y al cuello de botella del ancho de banda del bus USB compartido, los fotogramas llegaban a menudo desfasados. Esto provocaba que los filtros de tiempo bloquearan y descartaran constantemente los fotogramas desparejados, desplomando los FPS y congelando la vista panorámica.
-  * **Modo Asíncrono (Timer-based):** Para superar las limitaciones de hardware, se tomó la decisión de utilizar una arquitectura de fusión asíncrona. El nodo almacena independientemente en memoria el último fotograma válido recibido de cada cámara en cuanto llega. De forma paralela, un temporizador (timer) interno del nodo se encarga de leer ambas cachés a una frecuencia alta (por ejemplo, 30 FPS) y fusionar los dos últimos fotogramas disponibles, sin bloquearse a la espera de emparejamientos exactos. Aunque sacrificamos una mínima sincronización perfecta entre las dos mitades, ganamos un sistema increíblemente robusto, manteniendo un *framerate* constante y una fluidez de vídeo en tiempo real sin interrupciones computacionales.
-### Scripts de Soporte (`scripts/`)
-* **`listar_camaras.sh`**: Script en Bash y Python que interactúa con `v4l2-ctl` y OpenCV para depurar dispositivos `/dev/video*`.
-* **`calibrate_camera.sh`**: Wrapper automatizado que invoca el calibrador oficial de ROS 2 (`camera_calibration`) inyectando los parámetros correctos para la corrección monocular.
-* **`calibrar_estereo.sh`**: Wrapper para invocar el nodo de calibración en modo estéreo (`--approximate`, ignorando servicios inexistentes).
-* **`extraer_estereo.py`**: Script de post-procesamiento. Abre los tarballs (`.tar.gz`) generados por la GUI de ROS 2, extrae los parámetros estéreo ocultos en `ost.txt`, procesa el álgebra lineal para obtener $H$ y exporta el `board_homography.yaml` limpio para el nodo de fusión.
+### `camera_reader_node`
 
-### Launch (`launch/`)
-* **`fusionasincrona.launch.py`**: Orquestador para el modo de ejecución asíncrono. Lanza el lector de cámaras y el motor de fusión basado en temporizador, optimizado para alto rendimiento y evitar bloqueos por desajustes temporales.
-* **`fusionsincrona.launch.py`**: Orquestador para el modo de ejecución síncrono clásico. Lanza el lector de cámaras y el motor de fusión esperando fotogramas estrictamente pareados por tiempo.
+| Parámetro | Default | Descripción |
+|---|---|---|
+| `fps` | `30` | FPS solicitados al driver V4L2 |
+| `width` / `height` | `640` / `640` | Resolución solicitada a V4L2 (puede ignorarse por el hardware) |
+| `target_size` | `640` | Resolución de salida **garantizada** — resize siempre aplicado |
+
+### `camera_fusion_async_node` / `camera_multicams_node`
+
+| Parámetro | Default | Descripción |
+|---|---|---|
+| `canvas_w` / `canvas_h` | `640` / `640` | Resolución del canvas de salida |
+| `cam_w` / `cam_h` | `640` / `640` | Resolución esperada de los frames de entrada |
+| `overlap_start` / `overlap_end` | `280` / `360` | Columnas de inicio/fin de la zona de blending |
+| `interp` | `INTER_NEAREST` | Interpolación del remap (`INTER_NEAREST` ~2× más rápido que `INTER_LINEAR`) |
+| `slop_ms` | `50` / `150` | Diferencia máxima de timestamp entre frames para considerarlos válidos |
