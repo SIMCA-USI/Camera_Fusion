@@ -33,19 +33,16 @@ Para facilitar el uso repetitivo de las herramientas, es muy recomendable config
 Puedes añadir todo automáticamente ejecutando el siguiente bloque en tu terminal (asegúrate de que las rutas coinciden con la ubicación real de tus directorios):
 
 ```bash
-echo "alias calibrar='bash ~/camera_fusion_ws/scripts/calibrate_camera.sh'" >> ~/.bashrc
-echo "alias calibrar_estereo='bash ~/camera_fusion_ws/scripts/calibrar_estereo.sh'" >> ~/.bashrc
-echo "alias listar_camaras='bash ~/camera_fusion_ws/scripts/listar_camaras.sh'" >> ~/.bashrc
-echo "source ~/camera_fusion_ws/install/setup.bash" >> ~/.bashrc
-echo "source ~/fusion_ws/install/setup.bash" >> ~/.bashrc
-echo "export ROS_WS=/home/adrian/fusion_ws" >> ~/.bashrc
+echo "alias calibrar='bash ~/ros2_ws/src/camera_fusion_pkg/scripts/calibrate_camera.sh'" >> ~/.bashrc
+echo "alias calibrar_estereo='bash ~/ros2_ws/src/camera_fusion_pkg/scripts/calibrar_estereo.sh'" >> ~/.bashrc
+echo "alias listar_camaras='bash ~/ros2_ws/src/camera_fusion_pkg/scripts/listar_camaras.sh'" >> ~/.bashrc
 source ~/.bashrc
 ```
 
 ## Rutas de Calibración y Archivos YAML
 
 El nodo principal de fusión lee los parámetros de calibración desde archivos `.yaml`. Por defecto, el programa asume que estos archivos se encuentran en:
-`/home/$USER/camera_fusion_ws/src/camera_fusion_pkg/config/`
+`/home/$USER/ros2_ws/src/camera_fusion_pkg/config/`
 
 Si despliegas este proyecto en otra máquina, otro usuario, o en un directorio distinto, **debes actualizar la ruta de configuración**. 
 Para ello, el nodo en C++ expone el parámetro `config_dir`. Al lanzar el nodo o al modificar el archivo de lanzamiento (launch file), debes configurar el parámetro `config_dir` pasándole la ruta absoluta donde se generen y guarden los archivos `.yaml` de calibración.
@@ -57,7 +54,7 @@ Para ello, el nodo en C++ expone el parámetro `config_dir`. Al lanzar el nodo o
 ### Compilación
 Asegúrate de tener ROS 2 (Jazzy/Humble), OpenCV y la librería `yaml-cpp` instalados en la máquina de despliegue (`sudo apt update && sudo apt install libyaml-cpp-dev v4l-utils`).
 ```bash
-cd ~/camera_fusion_ws
+cd ~/ros2_ws
 colcon build
 source install/setup.bash
 ```
