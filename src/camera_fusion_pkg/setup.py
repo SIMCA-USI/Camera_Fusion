@@ -23,9 +23,6 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'camera_fusion_node = camera_fusion_pkg.camera_fusion_node:main',
-            'camera_fusion_async_node = camera_fusion_pkg.camera_fusion_async_node:main',
-            'camera_multicams_node = camera_fusion_pkg.camera_multicams_node:main',
             'camera_reader_node = camera_fusion_pkg.camera_reader_node:main'
         ],
     },

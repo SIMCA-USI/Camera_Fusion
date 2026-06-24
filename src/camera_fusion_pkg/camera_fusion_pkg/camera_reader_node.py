@@ -5,19 +5,13 @@ Camera Reader Node — Arquitectura multi-hilo por cámara.
 Cada cámara detectada corre en su propio hilo Python que hace cap.read()
 en un bucle continuo. Esto elimina el cuello de botella de las llamadas
 V4L2 grab() bloqueantes secuenciales que limitaban el FPS del timer.
-
-Resolución de salida:
-    Todos los frames publicados son SIEMPRE de tamaño (target_size × target_size),
-    independientemente del modo nativo que soporte el hardware. Si la cámara
-    devuelve una resolución diferente, se aplica cv2.resize antes de publicar.
-    Esto garantiza un formato uniforme para todos los consumidores downstream
-    (nodo de fusión, YOLO, etc.) sin necesidad de adaptar resoluciones en cada nodo.
 """
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 from sensor_msgs.msg import Image
 import cv2
+from cv_bridge import CvBridge
 import numpy as np
 import os
 import threading
@@ -30,22 +24,19 @@ class CameraReaderNode(Node):
 
         self.declare_parameter('fps', 30)
         self.declare_parameter('width', 640)
-        self.declare_parameter('height', 640)
-        self.declare_parameter('target_size', 640)   # resolución cuadrada de salida garantizada
+        self.declare_parameter('height', 480)
 
-        self._fps         = self.get_parameter('fps').value
-        self._width       = self.get_parameter('width').value
-        self._height      = self.get_parameter('height').value
-        self._target_size = self.get_parameter('target_size').value
-        self._period      = 1.0 / self._fps
+        self._fps    = self.get_parameter('fps').value
+        self._width  = self.get_parameter('width').value
+        self._height = self.get_parameter('height').value
+        self._period = 1.0 / self._fps   # tiempo mínimo entre frames (rate limiter)
 
         self._running = False
         self._cameras = []
         self._threads = []
+        self._bridge  = CvBridge()
 
-        self.get_logger().info(
-            f"Iniciando auto-descubrimiento de cámaras USB "
-            f"(salida garantizada: {self._target_size}×{self._target_size})...")
+        self.get_logger().info("Iniciando auto-descubrimiento de cámaras USB...")
         self._discover_cameras()
 
         if not self._cameras:
@@ -82,10 +73,13 @@ class CameraReaderNode(Node):
                 cap.release()
                 continue
 
-            # Solicitar la resolución deseada al driver (puede ser ignorado)
+            # 1. Force MJPG to avoid USB Bandwidth saturation (reduces stutters)
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
             cap.set(cv2.CAP_PROP_FRAME_WIDTH,  self._width)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._height)
             cap.set(cv2.CAP_PROP_FPS,          self._fps)
+            # 2. Force OpenCV to keep only the latest frame (prevents queue lag/stutter)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
             # Validar que produce frames reales
             valid = 0
@@ -95,9 +89,9 @@ class CameraReaderNode(Node):
                     valid += 1
 
             if valid > 0:
-                cam_name = f'cam_{cam_idx}'
-                topic    = f'{cam_name}/image_raw'
-                pub      = self.create_publisher(Image, topic, 10)
+                cam_name  = f'cam_{cam_idx}'
+                topic     = f'{cam_name}/image_raw'
+                pub       = self.create_publisher(Image, topic, 10)
 
                 self._cameras.append({
                     'cap':    cap,
@@ -114,53 +108,43 @@ class CameraReaderNode(Node):
     # ── BUCLE DE CAPTURA POR HILO ────────────────────────────────────────────
 
     def _capture_loop(self, cam: dict):
-        """Captura, normaliza a target_size×target_size y publica frames.
+        """Captura y publica frames de una cámara de forma continua.
 
         El bucle corre en su propio hilo para no bloquear otras cámaras.
-        SIEMPRE se aplica cv2.resize al tamaño de salida garantizado,
-        independientemente de la resolución real devuelta por el hardware.
-        Esto hace el código agnóstico al tipo de cámara conectada.
+        Un rate-limiter suave evita publicar más rápido de lo configurado.
         """
         cap    = cam['cap']
         pub    = cam['pub']
         name   = cam['name']
-        sz     = self._target_size
-
-        # Pre-construir el objeto Image con los campos fijos (evita alloc por frame).
-        # Tamaño garantizado: target_size × target_size × BGR.
-        msg              = Image()
-        msg.height       = sz
-        msg.width        = sz
-        msg.encoding     = 'bgr8'
-        msg.is_bigendian = False
-        msg.step         = sz * 3
-        msg.header.frame_id = f'{name}_link'
 
         while self._running and rclpy.ok():
             ret, frame = cap.read()
 
             if not ret or frame is None:
+                # Pequeña pausa antes de reintentar para no saturar CPU en error
                 time.sleep(0.005)
                 continue
 
-            # ── Normalización a resolución cuadrada garantizada ──────────────
-            # Se aplica SIEMPRE para que el nodo sea independiente del hardware.
-            # Si la cámara ya devuelve sz×sz, el resize es un no-op barato de OpenCV.
-            h, w = frame.shape[:2]
-            if h != sz or w != sz:
-                frame = cv2.resize(frame, (sz, sz), interpolation=cv2.INTER_LINEAR)
+            # Timestamp de captura real
+            stamp = self.get_clock().now().to_msg()
 
-            # Timestamp de captura (más preciso que el de publicación)
-            msg.header.stamp = self.get_clock().now().to_msg()
-            msg.data         = frame.tobytes()
+            # Crear un MENSAJE NUEVO cada frame usando cv_bridge.
+            # Reutilizar el mismo objeto msg causaba condiciones de carrera con el publicador ROS 2,
+            # lo que generaba corrupción y tirones (stutters) esporádicos.
+            msg = self._bridge.cv2_to_imgmsg(frame, encoding="bgr8")
+            msg.header.stamp = stamp
+            msg.header.frame_id = f'{name}_link'
+
             pub.publish(msg)
 
     # ── LIMPIEZA ─────────────────────────────────────────────────────────────
 
     def destroy_node(self):
         self._running = False
+        # Esperar a que los hilos terminen (máx 1s)
         for t in self._threads:
             t.join(timeout=1.0)
+        # Liberar capturas
         for cam in self._cameras:
             if cam['cap'].isOpened():
                 cam['cap'].release()

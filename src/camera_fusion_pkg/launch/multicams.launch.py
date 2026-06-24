@@ -3,7 +3,6 @@ from launch_ros.actions import Node
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 
-
 def generate_launch_description():
     namespace_arg = DeclareLaunchArgument(
         'namespace',
@@ -17,13 +16,7 @@ def generate_launch_description():
         executable='camera_reader_node',
         name='camera_reader',
         namespace=namespace,
-        output='screen',
-        parameters=[{
-            'fps':         30,
-            'width':       640,    # resolución solicitada a V4L2 (puede ignorarse)
-            'height':      640,    # resolución solicitada a V4L2 (puede ignorarse)
-            'target_size': 640,    # resolución de salida GARANTIZADA (resize siempre aplicado)
-        }]
+        output='screen'
     )
 
     fusion_node = Node(
@@ -31,14 +24,7 @@ def generate_launch_description():
         executable='camera_multicams_node',
         name='multicams_fusion',
         namespace=namespace,
-        output='screen',
-        parameters=[{
-            'canvas_w': 640,
-            'canvas_h': 640,
-            'cam_w':    640,
-            'cam_h':    640,
-            'slop_ms':  150,
-        }]
+        output='screen'
     )
 
     return LaunchDescription([

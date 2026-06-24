@@ -12,17 +12,9 @@ def generate_launch_description():
     )
     namespace = LaunchConfiguration('namespace')
 
-    reader_node = Node(
-        package='camera_fusion_pkg',
-        executable='camera_reader_node',
-        name='camera_reader',
-        namespace=namespace,
-        output='screen'
-    )
-
     fusion_node = Node(
-        package='camera_fusion_pkg',
-        executable='camera_fusion_async_node',
+        package='camera_fusion_cpp_pkg',
+        executable='camera_fusion_cpp_node',
         name='panoramic_fusion',
         namespace=namespace,
         output='screen'
@@ -30,6 +22,5 @@ def generate_launch_description():
 
     return LaunchDescription([
         namespace_arg,
-        reader_node,
         fusion_node,
     ])
