@@ -19,10 +19,11 @@
 class PanoramicFusionCppNode : public rclcpp::Node
 {
 public:
-    PanoramicFusionCppNode() : Node("panoramic_fusion_cpp_node"), running_(true)
+    PanoramicFusionCppNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions()) 
+        : Node("panoramic_fusion_cpp_node", options), running_(true)
     {
-        // Parámetros de captura
-        this->declare_parameter("fps", 15);
+        // 1. Declare and get parameters
+        this->declare_parameter("fps", 30);
         this->declare_parameter("overlap_start", 400);
         this->declare_parameter("overlap_end", 600);
         this->declare_parameter("canvas_w", 1100);
@@ -30,26 +31,29 @@ public:
         this->declare_parameter("cam_w", 640);
         this->declare_parameter("cam_h", 480);
         this->declare_parameter("interp", static_cast<int>(cv::INTER_LINEAR));
-
-        // Parámetros para tópicos individuales (mantener relación de aspecto sin recortar)
         this->declare_parameter("indiv_resize_w", 640);
         this->declare_parameter("indiv_resize_h", 480);
-
-        // Parámetro para la ruta de los archivos de calibración
+        
         std::string default_config = std::string(std::getenv("HOME")) + "/camera_fusion_ws/src/camera_fusion_pkg/config";
         this->declare_parameter("config_dir", default_config);
+        this->declare_parameter("margin_x", 30);
+        this->declare_parameter("margin_y", 10);
 
-        fps_           = this->get_parameter("fps").as_int();
-        overlap_start_ = this->get_parameter("overlap_start").as_int();
-        overlap_end_   = this->get_parameter("overlap_end").as_int();
-        canvas_w_      = this->get_parameter("canvas_w").as_int();
-        canvas_h_      = this->get_parameter("canvas_h").as_int();
-        cam_w_         = this->get_parameter("cam_w").as_int();
-        cam_h_         = this->get_parameter("cam_h").as_int();
-        interp_        = this->get_parameter("interp").as_int();
-
+        fps_            = this->get_parameter("fps").as_int();
+        overlap_start_  = this->get_parameter("overlap_start").as_int();
+        overlap_end_    = this->get_parameter("overlap_end").as_int();
+        canvas_w_       = this->get_parameter("canvas_w").as_int();
+        canvas_h_       = this->get_parameter("canvas_h").as_int();
+        cam_w_          = this->get_parameter("cam_w").as_int();
+        cam_h_          = this->get_parameter("cam_h").as_int();
+        interp_         = this->get_parameter("interp").as_int();
+        indiv_resize_w_ = this->get_parameter("indiv_resize_w").as_int();
+        indiv_resize_h_ = this->get_parameter("indiv_resize_h").as_int();
+        int margin_x    = this->get_parameter("margin_x").as_int();
+        int margin_y    = this->get_parameter("margin_y").as_int();
         std::string config_dir = this->get_parameter("config_dir").as_string();
-        
+
+        // 2. Load Calibration Data
         load_intrinsics(config_dir + "/cam_1_calibration.yaml", K1_, D1_);
         load_intrinsics(config_dir + "/cam_2_calibration.yaml", K2_, D2_);
         load_homography(config_dir + "/board_homography.yaml", H_);
@@ -57,10 +61,9 @@ public:
         cv::Size size_cam(cam_w_, cam_h_);
         cv::Size size_cnvs(canvas_w_, canvas_h_);
 
-        // Warping Maps for Cam 1
+        // 3. Prepare Warping Maps
         cv::initUndistortRectifyMap(K1_, D1_, cv::Mat(), K1_, size_cam, CV_16SC2, map1x_, map1y_);
 
-        // Warping Maps for Cam 2
         cv::Mat m2x, m2y;
         cv::initUndistortRectifyMap(K2_, D2_, cv::Mat(), K2_, size_cam, CV_32FC1, m2x, m2y);
         
@@ -74,9 +77,9 @@ public:
         
         m2x.setTo(-1.0, warped_mask == 0);
         m2y.setTo(-1.0, warped_mask == 0);
-
         cv::convertMaps(m2x, m2y, map2x_, map2y_, CV_16SC2);
 
+        // 4. Compute Bounding Box for Cropping
         cv::Mat white = cv::Mat::ones(cam_h_, cam_w_, CV_8UC1) * 255;
         cv::Mat mask1, mask2;
         cv::remap(white, mask1, map1x_, map1y_, cv::INTER_NEAREST);
@@ -88,23 +91,12 @@ public:
         cv::bitwise_or(combined_mask, mask2, combined_mask);
         
         cv::Rect bbox = cv::boundingRect(combined_mask);
-        
-        this->declare_parameter("margin_x", 30);
-        this->declare_parameter("margin_y", 10);
-        int margin_x = this->get_parameter("margin_x").as_int();
-        int margin_y = this->get_parameter("margin_y").as_int();
-        
         crop_x_ = std::min(bbox.x + margin_x, canvas_w_ - 1);
         crop_y_ = std::min(bbox.y + margin_y, canvas_h_ - 1);
         crop_w_ = std::max(10, bbox.width - 2 * margin_x);
         crop_h_ = std::max(10, bbox.height - 2 * margin_y);
 
-        double scale = std::min(640.0 / crop_w_, 640.0 / crop_h_);
-        new_w_ = static_cast<int>(crop_w_ * scale);
-        new_h_ = static_cast<int>(crop_h_ * scale);
-        x_offset_ = (640 - new_w_) / 2;
-        y_offset_ = (640 - new_h_) / 2;
-
+        // 5. Blending setup
         blend_s_ = std::max(0, std::min(overlap_start_, cam_w_ - 1));
         blend_e_ = std::max(blend_s_ + 1, std::min(overlap_end_, cam_w_));
         int bw = blend_e_ - blend_s_;
@@ -114,59 +106,52 @@ public:
             alpha_1d_[x] = static_cast<uint16_t>(std::round(256.0 - (256.0 * x / (bw - 1))));
         }
 
+        // 6. Output Canvases & Threading
         req1_ = cv::Rect(0, 0, blend_e_, cam_h_);
         req2_ = cv::Rect(blend_s_, 0, canvas_w_ - blend_s_, canvas_h_);
         
         out1_req_ = cv::Mat::zeros(req1_.height, req1_.width, CV_8UC3);
         out2_req_ = cv::Mat::zeros(req2_.height, req2_.width, CV_8UC3);
         canvas_.create(canvas_h_, canvas_w_, CV_8UC3);
-        resized_ = cv::Mat(new_h_, new_w_, CV_8UC3);
-
-        out_msg_ = std::make_shared<sensor_msgs::msg::Image>();
-        out_msg_->height       = 640;
-        out_msg_->width        = 640;
-        out_msg_->encoding     = "bgr8";
-        out_msg_->is_bigendian = false;
-        out_msg_->step         = 640 * 3;
-        out_msg_->data.resize(640 * 640 * 3, 0);
-        final_canvas_ = cv::Mat(640, 640, CV_8UC3, out_msg_->data.data());
 
         cv::setNumThreads(2);
 
-        rclcpp::QoS qos(1);
-        qos.best_effort();
-        qos.keep_last(1);
+        rclcpp::QoS qos(5);
+        qos.reliable();
 
         pub_ = this->create_publisher<sensor_msgs::msg::Image>("/ravo/followme/video_frames", qos);
 
-        // Inicializar captura directa
+        // 7. Initialize Cameras
         discover_cameras();
     }
 
     ~PanoramicFusionCppNode()
     {
         running_ = false;
+        fusion_cv_.notify_all();
+        if (fusion_thread_.joinable()) fusion_thread_.join();
         for (auto& t : capture_threads_) {
             if (t.joinable()) t.join();
         }
     }
 
 private:
+    // ---- Configuration Parameters ----
     int fps_, overlap_start_, overlap_end_, canvas_w_, canvas_h_, cam_w_, cam_h_, interp_;
+    int indiv_resize_w_, indiv_resize_h_;
     int crop_x_, crop_y_, crop_w_, crop_h_;
-    int new_w_, new_h_, x_offset_, y_offset_;
     int blend_s_, blend_e_;
 
+    // ---- Calibration & Warping ----
     cv::Mat K1_, D1_, K2_, D2_, H_;
     cv::Mat map1x_, map1y_, map2x_, map2y_;
     std::vector<uint16_t> alpha_1d_;
-    cv::Mat out1_req_, out2_req_, canvas_, final_canvas_, resized_;
+
+    // ---- Working Memory (Avoid allocations in loop) ----
+    cv::Mat out1_req_, out2_req_, canvas_;
     cv::Rect req1_, req2_;
-    sensor_msgs::msg::Image::SharedPtr out_msg_;
 
-    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_;
-
-    // ---- Estructuras para lectura V4L2 interna ----
+    // ---- Hardware Capture & Threading ----
     struct Camera {
         int id;
         std::string name;
@@ -174,13 +159,26 @@ private:
         rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub;
         cv::Mat latest_frame;
         std::mutex frame_mutex;
+        std::chrono::high_resolution_clock::time_point last_pub_time;
+        std::chrono::high_resolution_clock::time_point last_log_time;
+        std::atomic<bool> is_fresh{false};
     };
 
     std::atomic<bool> running_;
     std::vector<std::shared_ptr<Camera>> cameras_;
     std::vector<std::thread> capture_threads_;
-    rclcpp::TimerBase::SharedPtr fusion_timer_;
+    
+    // ---- Hardware Synchronization ----
+    std::thread fusion_thread_;
+    std::mutex fusion_mutex_;
+    std::condition_variable fusion_cv_;
+    bool new_frame_ready_ = false;
 
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_;
+
+    // =========================================================================
+    // Core Methods
+    // =========================================================================
 
     void load_intrinsics(const std::string& path, cv::Mat& K, cv::Mat& D) {
         try {
@@ -189,7 +187,7 @@ private:
             std::vector<double> d_data = config["distortion_coefficients"]["data"].as<std::vector<double>>();
             K = cv::Mat(3, 3, CV_64F, k_data.data()).clone();
             D = cv::Mat(1, 5, CV_64F, d_data.data()).clone();
-        } catch (const std::exception& e) {
+        } catch (const std::exception&) {
             K = cv::Mat::eye(3, 3, CV_64F);
             D = cv::Mat::zeros(1, 5, CV_64F);
             RCLCPP_WARN(this->get_logger(), "No se pudo cargar %s. Usando identidad.", path.c_str());
@@ -201,9 +199,9 @@ private:
             YAML::Node config = YAML::LoadFile(path);
             std::vector<double> h_data = config["homography_matrix"]["data"].as<std::vector<double>>();
             H = cv::Mat(3, 3, CV_64F, h_data.data()).clone();
-        } catch (const std::exception& e) {
+        } catch (const std::exception&) {
             H = cv::Mat::eye(3, 3, CV_64F);
-            RCLCPP_WARN(this->get_logger(), "No se pudo cargar homografía. Usando identidad.");
+            RCLCPP_WARN(this->get_logger(), "No se pudo cargar homografia. Usando identidad.");
         }
     }
 
@@ -223,7 +221,7 @@ private:
             if (cam_idx > 2) break; // Solo necesitamos 2 camaras
 
             std::string hw_name = get_camera_name(i);
-            // Ignorar las cámaras web integradas del portátil
+            // Ignorar las cámaras web integradas del portatil
             if (hw_name.find("Integrated") != std::string::npos || hw_name.empty()) {
                 continue; 
             }
@@ -258,57 +256,79 @@ private:
             auto cam  = std::make_shared<Camera>();
             cam->id   = i;
             cam->name = "cam_" + std::to_string(cam_idx++);
+            rclcpp::QoS qos_cam(5);
+            qos_cam.reliable();
             cam->cap  = std::move(cap);
             cam->pub  = this->create_publisher<sensor_msgs::msg::Image>(
-                cam->name + "/image_raw", rclcpp::SensorDataQoS());
+                cam->name + "/image_raw", qos_cam);
 
-            RCLCPP_INFO(this->get_logger(), "Camara %s adquirida internamente en /dev/video%d", cam->name.c_str(), i);
+            RCLCPP_INFO(this->get_logger(), "Camara %s descubierta en /dev/video%d", cam->name.c_str(), i);
 
             cameras_.push_back(cam);
             capture_threads_.emplace_back(&PanoramicFusionCppNode::capture_thread_func, this, cam);
         }
 
         if (cameras_.size() < 2) {
-            RCLCPP_ERROR(this->get_logger(), "No se encontraron 2 camaras validas. Encontradas: %zu", cameras_.size());
+            RCLCPP_ERROR(this->get_logger(), "No se encontraron 2 camaras validas.");
         } else {
-            RCLCPP_INFO(this->get_logger(), "Camaras enlazadas. Iniciando fusion directa Zero-Delay.");
-            
-            auto period = std::chrono::milliseconds(1000 / fps_);
-            fusion_timer_ = this->create_wall_timer(
-                period, std::bind(&PanoramicFusionCppNode::fusion_timer_callback, this));
+            RCLCPP_INFO(this->get_logger(), "Camaras enlazadas. Iniciando fusion directa (Hardware-Synced).");
+            fusion_thread_ = std::thread(&PanoramicFusionCppNode::fusion_worker, this);
         }
     }
 
     void capture_thread_func(std::shared_ptr<Camera> cam)
     {
-        cv::Mat frame;
+        cv::Mat raw_frame;
         while (running_ && rclcpp::ok()) {
             if (!cam->cap->grab()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 continue;
             }
 
-            if (!cam->cap->retrieve(frame) || frame.empty()) {
+            if (!cam->cap->retrieve(raw_frame) || raw_frame.empty()) {
                 continue;
             }
 
+            // Copia profunda fuera del hilo principal para no bloquear la fusion
+            cv::Mat new_frame = raw_frame.clone();
+
             {
                 std::lock_guard<std::mutex> lock(cam->frame_mutex);
-                frame.copyTo(cam->latest_frame);
+                std::swap(cam->latest_frame, new_frame);
+            }
+            cam->is_fresh = true;
+
+            // Si esta es la camara maestra (cam_1), dispara la fusion
+            if (cam == cameras_[0]) {
+                {
+                    std::lock_guard<std::mutex> lock(fusion_mutex_);
+                    new_frame_ready_ = true;
+                }
+                fusion_cv_.notify_one();
             }
         }
         cam->cap->release();
     }
 
     void publish_camera(std::shared_ptr<Camera> cam, const cv::Mat& raw_frame) {
-        cv::Mat frame;
-        int rw = this->get_parameter("indiv_resize_w").as_int();
-        int rh = this->get_parameter("indiv_resize_h").as_int();
+        auto now = std::chrono::high_resolution_clock::now();
+        if (cam->last_pub_time.time_since_epoch().count() > 0) {
+            auto diff = std::chrono::duration<double, std::milli>(now - cam->last_pub_time).count();
+            
+            auto time_since_log = std::chrono::duration<double, std::milli>(now - cam->last_log_time).count();
+            if (time_since_log >= 500.0) {
+                RCLCPP_INFO(this->get_logger(), "[%s] Publish interval: %.2f ms", cam->name.c_str(), diff);
+                cam->last_log_time = now;
+            }
+        }
+        cam->last_pub_time = now;
 
-        if (rw > 0 && rh > 0 && (rw != raw_frame.cols || rh != raw_frame.rows)) {
-            cv::resize(raw_frame, frame, cv::Size(rw, rh), 0, 0, cv::INTER_LINEAR);
+        cv::Mat frame;
+        if (indiv_resize_w_ > 0 && indiv_resize_h_ > 0 && 
+           (indiv_resize_w_ != raw_frame.cols || indiv_resize_h_ != raw_frame.rows)) {
+            cv::resize(raw_frame, frame, cv::Size(indiv_resize_w_, indiv_resize_h_), 0, 0, cv::INTER_LINEAR);
         } else {
-            frame = raw_frame;
+            frame = raw_frame; // Zero-copy refcount increment
         }
 
         auto msg = std::make_unique<sensor_msgs::msg::Image>();
@@ -327,7 +347,19 @@ private:
         cam->pub->publish(std::move(msg));
     }
 
-    void fusion_timer_callback()
+    void fusion_worker() {
+        while (running_ && rclcpp::ok()) {
+            std::unique_lock<std::mutex> lock(fusion_mutex_);
+            fusion_cv_.wait(lock, [this]() { return new_frame_ready_ || !running_; });
+            if (!running_) break;
+            new_frame_ready_ = false;
+            lock.unlock();
+
+            do_fusion();
+        }
+    }
+
+    void do_fusion()
     {
         if (cameras_.size() < 2) return;
 
@@ -335,12 +367,20 @@ private:
         {
             std::lock_guard<std::mutex> lock1(cameras_[0]->frame_mutex);
             if (cameras_[0]->latest_frame.empty()) return;
-            frame1 = cameras_[0]->latest_frame.clone();
+            frame1 = cameras_[0]->latest_frame; // Referencia rapida O(1)
         }
         {
             std::lock_guard<std::mutex> lock2(cameras_[1]->frame_mutex);
             if (cameras_[1]->latest_frame.empty()) return;
-            frame2 = cameras_[1]->latest_frame.clone();
+            frame2 = cameras_[1]->latest_frame;
+        }
+
+        bool fresh1 = cameras_[0]->is_fresh.exchange(false);
+        bool fresh2 = cameras_[1]->is_fresh.exchange(false);
+
+        if (!fresh1 || !fresh2) {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 500, 
+                "TIRON DETECTADO: Usando frame repetido (cam_1 fresh: %d, cam_2 fresh: %d)", fresh1, fresh2);
         }
 
         publish_camera(cameras_[0], frame1);
@@ -383,25 +423,32 @@ private:
             }
 
             cv::Mat cropped = canvas_(cv::Rect(crop_x_, crop_y_, crop_w_, crop_h_));
-            cv::resize(cropped, resized_, cv::Size(new_w_, new_h_), 0, 0, cv::INTER_LINEAR);
             
-            resized_.copyTo(final_canvas_(cv::Rect(x_offset_, y_offset_, new_w_, new_h_)));
+            auto out_msg = std::make_unique<sensor_msgs::msg::Image>();
+            out_msg->header.stamp = this->now();
+            out_msg->header.frame_id = "panoramic_link";
+            out_msg->height       = cropped.rows;
+            out_msg->width        = cropped.cols;
+            out_msg->encoding     = "bgr8";
+            out_msg->is_bigendian = false;
+            out_msg->step         = cropped.cols * 3;
+            out_msg->data.resize(out_msg->step * out_msg->height);
 
-            out_msg_->header.stamp = this->now();
-            out_msg_->header.frame_id = "panoramic_link";
-            
+            cv::Mat final_canvas(cropped.rows, cropped.cols, CV_8UC3, out_msg->data.data());
+            cropped.copyTo(final_canvas);
+
             auto start_pub = std::chrono::high_resolution_clock::now();
-            pub_->publish(*out_msg_);
+            pub_->publish(std::move(out_msg));
             auto end_pub = std::chrono::high_resolution_clock::now();
 
             auto duration_fuse = std::chrono::duration<double, std::milli>(start_pub - start_fuse).count();
             auto duration_pub = std::chrono::duration<double, std::milli>(end_pub - start_pub).count();
             
-            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000, 
+            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500, 
                 "Fuse took: %.2f ms | Publish took: %.2f ms", duration_fuse, duration_pub);
 
         } catch (const std::exception& e) {
-            RCLCPP_ERROR(this->get_logger(), "Excepción en fusión: %s", e.what());
+            RCLCPP_ERROR(this->get_logger(), "Excepcion en fusion: %s", e.what());
         }
     }
 };
@@ -409,7 +456,9 @@ private:
 int main(int argc, char** argv)
 {
     rclcpp::init(argc, argv);
-    auto node = std::make_shared<PanoramicFusionCppNode>();
+    rclcpp::NodeOptions options;
+    options.use_intra_process_comms(true);
+    auto node = std::make_shared<PanoramicFusionCppNode>(options);
     rclcpp::spin(node);
     rclcpp::shutdown();
     return 0;

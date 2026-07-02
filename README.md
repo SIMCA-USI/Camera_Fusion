@@ -80,8 +80,18 @@ calibrar_estereo 9x6 0.0404 /cam_1/image_raw /cam_2/image_raw
 ```
 
 ### 3. Ejecución del Sistema
-El sistema completo ha sido refactorizado a un nodo monolítico en C++ que realiza la captura desde hardware y la fusión en un único proceso, consiguiendo evitar los cuellos de botella de red DDS (Zero-Copy).
 
+**Visualización Recomendada:**
+Para visualizar correctamente el resultado de la fusión o los topics de vídeo individuales sin pérdida de rendimiento, se recomienda utilizar **RViz2**.
+
+**Lectura Individual de Cámaras:**
+Si necesitas revisar las cámaras por separado (por ejemplo, para depurar antes de la calibración), puedes lanzar el nodo lector nativo en C++:
+```bash
+ros2 run camera_fusion_cpp_pkg camera_reader_cpp_node
+```
+
+**Fusión Panorámica:**
+El sistema completo ha sido refactorizado a un nodo monolítico en C++ que realiza la captura desde hardware y la fusión en un único proceso, consiguiendo evitar los cuellos de botella de red DDS (Zero-Copy).
 ```bash
 ros2 launch camera_fusion_pkg fusionasincrona.launch.py
 ```
