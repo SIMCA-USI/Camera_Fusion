@@ -4,6 +4,7 @@
  */
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
+#include <sensor_msgs/msg/camera_info.hpp>
 #include <cv_bridge/cv_bridge.hpp>
 #include <opencv2/opencv.hpp>
 #include <yaml-cpp/yaml.h>
@@ -15,6 +16,8 @@
 #include <atomic>
 #include <vector>
 #include <fstream>
+#include <ament_index_cpp/get_package_share_directory.hpp>
+#include <std_srvs/srv/trigger.hpp>
 
 class PanoramicFusionCppNode : public rclcpp::Node
 {
@@ -34,7 +37,13 @@ public:
         this->declare_parameter("indiv_resize_w", 640);
         this->declare_parameter("indiv_resize_h", 480);
         
-        std::string default_config = std::string(std::getenv("HOME")) + "/camera_fusion_ws/src/camera_fusion_pkg/config";
+        std::string default_config;
+        try {
+            default_config = ament_index_cpp::get_package_share_directory("camera_fusion_pkg") + "/config";
+        } catch (const std::exception& e) {
+            default_config = std::string(std::getenv("HOME")) + "/fusiones_ws/src/camera_fusion_pkg/config";
+        }
+        
         this->declare_parameter("config_dir", default_config);
         this->declare_parameter("margin_x", 30);
         this->declare_parameter("margin_y", 10);
@@ -91,10 +100,26 @@ public:
         cv::bitwise_or(combined_mask, mask2, combined_mask);
         
         cv::Rect bbox = cv::boundingRect(combined_mask);
+
+        // Clamp right boundary to cam2's valid warped region.
+        // combined_mask can include remap-boundary pixels that are technically
+        // "valid" but map to black (outside cam2's FOV), producing the right
+        // black column. warped_mask is thresholded at 254 so it only marks
+        // pixels where the homography projects real cam2 content.
+        cv::Rect cam2_valid_bbox = cv::boundingRect(warped_mask);
+        int right_bound = cam2_valid_bbox.x + cam2_valid_bbox.width;
+        if (right_bound < bbox.x + bbox.width) {
+            bbox.width = right_bound - bbox.x;
+        }
+
         crop_x_ = std::min(bbox.x + margin_x, canvas_w_ - 1);
         crop_y_ = std::min(bbox.y + margin_y, canvas_h_ - 1);
         crop_w_ = std::max(10, bbox.width - 2 * margin_x);
         crop_h_ = std::max(10, bbox.height - 2 * margin_y);
+
+        RCLCPP_INFO(this->get_logger(),
+            "Crop calculado → x=%d y=%d w=%d h=%d | cam2 right bound=%d",
+            crop_x_, crop_y_, crop_w_, crop_h_, right_bound);
 
         // 5. Blending setup
         blend_s_ = std::max(0, std::min(overlap_start_, cam_w_ - 1));
@@ -119,7 +144,22 @@ public:
         rclcpp::QoS qos(5);
         qos.reliable();
 
-        pub_ = this->create_publisher<sensor_msgs::msg::Image>("/ravo/followme/video_frames", qos);
+        pub_ = this->create_publisher<sensor_msgs::msg::Image>("/carrito/followme/video_frames", qos);
+
+        // CameraInfo: TRANSIENT_LOCAL = latched, cualquier suscriptor que se conecte
+        // después recibirá el último mensaje inmediatamente.
+        rclcpp::QoS qos_info(1);
+        qos_info.reliable();
+        qos_info.transient_local();
+        cam_info_pub_ = this->create_publisher<sensor_msgs::msg::CameraInfo>(
+            "/carrito/followme/camera_info", qos_info);
+
+        // Construye la CameraInfo una sola vez (valores estáticos post-crop)
+        build_camera_info();
+
+        swap_srv_ = this->create_service<std_srvs::srv::Trigger>(
+            "/camera_fusion/swap_cameras",
+            std::bind(&PanoramicFusionCppNode::swap_cameras_callback, this, std::placeholders::_1, std::placeholders::_2));
 
         // 7. Initialize Cameras
         discover_cameras();
@@ -175,10 +215,88 @@ private:
     bool new_frame_ready_ = false;
 
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_;
+    rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr cam_info_pub_;
+    sensor_msgs::msg::CameraInfo cam_info_msg_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr swap_srv_;
 
     // =========================================================================
     // Core Methods
     // =========================================================================
+
+    /**
+     * Construye la sensor_msgs::CameraInfo para la imagen panorámica fusionada.
+     *
+     * La imagen fusionada ya está undistorsionada → D = zeros.
+     * cam_1 se coloca directamente (solo undistorsión), así que su K intrínseca
+     * es válida como aproximación global. El crop desplaza el origen de imagen:
+     *   cx_new = cx - crop_x_
+     *   cy_new = cy - crop_y_
+     * fx y fy no varían (el crop no escala).
+     *
+     * Se llama una sola vez tras calcular crop_x_/y_/w_/h_.
+     */
+    void build_camera_info()
+    {
+        cam_info_msg_.header.frame_id = "panoramic_link";
+        cam_info_msg_.width  = static_cast<uint32_t>(crop_w_);
+        cam_info_msg_.height = static_cast<uint32_t>(crop_h_);
+        cam_info_msg_.distortion_model = "plumb_bob";
+
+        // K1_ = [fx, 0, cx; 0, fy, cy; 0, 0, 1]  (CV_64F)
+        double fx = K1_.at<double>(0, 0);
+        double fy = K1_.at<double>(1, 1);
+        double cx = K1_.at<double>(0, 2) - static_cast<double>(crop_x_);
+        double cy = K1_.at<double>(1, 2) - static_cast<double>(crop_y_);
+
+        // D = zeros (ya undistorsionada)
+        cam_info_msg_.d = {0.0, 0.0, 0.0, 0.0, 0.0};
+
+        // K (3x3 row-major)
+        cam_info_msg_.k = {
+            fx,  0.0,  cx,
+            0.0,  fy,  cy,
+            0.0, 0.0, 1.0
+        };
+
+        // R = identidad
+        cam_info_msg_.r = {
+            1.0, 0.0, 0.0,
+            0.0, 1.0, 0.0,
+            0.0, 0.0, 1.0
+        };
+
+        // P (3x4 row-major, sin baseline)
+        cam_info_msg_.p = {
+            fx,  0.0,  cx, 0.0,
+            0.0,  fy,  cy, 0.0,
+            0.0, 0.0, 1.0, 0.0
+        };
+
+        // Publica inmediatamente (TRANSIENT_LOCAL → cualquier suscriptor futuro la recibe)
+        cam_info_msg_.header.stamp = this->now();
+        cam_info_pub_->publish(cam_info_msg_);
+
+        RCLCPP_INFO(this->get_logger(),
+            "CameraInfo panorámica: %dx%d | fx=%.2f fy=%.2f cx=%.2f cy=%.2f",
+            crop_w_, crop_h_, fx, fy, cx, cy);
+    }
+
+    bool swap_cameras_callback(const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
+                               std::shared_ptr<std_srvs::srv::Trigger::Response> res)
+    {
+        (void)req;
+        std::lock_guard<std::mutex> lock(fusion_mutex_);
+        if (cameras_.size() >= 2) {
+            std::swap(cameras_[0], cameras_[1]);
+            res->success = true;
+            res->message = "Camaras intercambiadas correctamente.";
+            RCLCPP_INFO(this->get_logger(), "Camaras intercambiadas por servicio GUI.");
+        } else {
+            res->success = false;
+            res->message = "No hay suficientes camaras conectadas.";
+        }
+        return true;
+    }
 
     void load_intrinsics(const std::string& path, cv::Mat& K, cv::Mat& D) {
         try {
@@ -438,7 +556,14 @@ private:
             cropped.copyTo(final_canvas);
 
             auto start_pub = std::chrono::high_resolution_clock::now();
+            auto stamp = this->now();
+            out_msg->header.stamp = stamp;
             pub_->publish(std::move(out_msg));
+
+            // Publica CameraInfo con el mismo timestamp que el frame
+            cam_info_msg_.header.stamp = stamp;
+            cam_info_pub_->publish(cam_info_msg_);
+
             auto end_pub = std::chrono::high_resolution_clock::now();
 
             auto duration_fuse = std::chrono::duration<double, std::milli>(start_pub - start_fuse).count();

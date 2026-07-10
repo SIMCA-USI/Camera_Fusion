@@ -13,9 +13,11 @@ find_package(cv_bridge REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(yaml-cpp REQUIRED)
 find_package(message_filters REQUIRED)
+find_package(ament_index_cpp REQUIRED)
+find_package(std_srvs REQUIRED)
 
 add_executable(camera_fusion_cpp_node src/camera_fusion_cpp_node.cpp)
-ament_target_dependencies(camera_fusion_cpp_node rclcpp sensor_msgs cv_bridge OpenCV message_filters)
+ament_target_dependencies(camera_fusion_cpp_node rclcpp sensor_msgs cv_bridge OpenCV message_filters ament_index_cpp std_srvs)
 target_link_libraries(camera_fusion_cpp_node yaml-cpp)
 
 add_executable(camera_reader_cpp_node src/camera_reader_cpp_node.cpp)

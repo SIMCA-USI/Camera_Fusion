@@ -5,7 +5,7 @@ import scipy.linalg
 import os
 
 def main():
-    config_dir = os.path.expanduser("~/camera_fusion_ws/src/camera_fusion_pkg/config")
+    config_dir = os.path.expanduser("~/fusiones_ws/src/camera_fusion_pkg/config")
     input_file = os.path.join(config_dir, "board_homography.yaml")
     output_file = os.path.join(config_dir, "virtual_homography.yaml")
 
