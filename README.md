@@ -51,30 +51,28 @@ Para ello, el nodo en C++ expone el parámetro `config_dir`. Al lanzar el nodo o
 
 ## Tabla de Resoluciones de Referencia
 
-La resolución final de la panorámica **depende de toda la cadena desde el principio**: la calibración intrínseca y la calibración estéreo deben hacerse a la misma resolución que se configure en el nodo de fusión. Si se cambia la resolución, hay que **recalibrar todo desde cero**.
+Todos los pasos de la cadena deben ejecutarse a la **misma resolución**. Si cambias la resolución, debes recalibrar desde cero. Usa esta tabla como referencia completa:
 
-Los parámetros del nodo de fusión que dependen de la resolución son:
-
-| Parámetro | Descripción |
-|---|---|
-| `cam_w` / `cam_h` | Resolución física de captura de cada cámara por USB (debe coincidir con la resolución de calibración) |
-| `canvas_w` / `canvas_h` | Tamaño del lienzo interno de trabajo (aprox. el doble de ancho que la cámara) |
-| `overlap_start` / `overlap_end` | Zona de blending en píxeles X sobre el lienzo (zona central donde se solapan ambas cámaras) |
-| `margin_x` / `margin_y` | Márgenes en píxeles para recortar los bordes negros del resultado final |
-
-### Configuraciones Probadas
-
-| Parámetro | **480p** *(defecto)* | **720p** | **1080p** |
+| Parámetro | **480p** | **720p** | **1080p** |
 |---|---|---|---|
+| **① `camera_reader` — streaming durante calibración** | | | |
+| `width` × `height` | 640 × 480 | 1280 × 720 | 1920 × 1080 |
+| **② Calibración intrínseca** (`calibrar`) | | | |
+| Resolución del stream al calibrar | 640 × 480 | 1280 × 720 | 1920 × 1080 |
+| Archivos generados | `cam_1_calibration.yaml` `cam_2_calibration.yaml` | ← ídem | ← ídem |
+| **③ Calibración estéreo** (`calibrar_estereo`) | | | |
+| Resolución del stream al calibrar | 640 × 480 | 1280 × 720 | 1920 × 1080 |
+| Archivo generado | `board_homography.yaml` | ← ídem | ← ídem |
+| **④ Nodo de fusión** (`camera_fusion_cpp_node`) | | | |
 | `cam_w` × `cam_h` | 640 × 480 | 1280 × 720 | 1920 × 1080 |
 | `canvas_w` × `canvas_h` | 1100 × 480 | 2200 × 720 | 3300 × 1080 |
 | `overlap_start` | 475 | 950 | 1425 |
 | `overlap_end` | 525 | 1050 | 1575 |
-| Panorámica aprox. | ~1040 × 460 px | ~2100 × 700 px | ~3150 × 1060 px |
+| **Resultado final aprox.** | ~1040 × 460 px | ~2100 × 700 px | ~3150 × 1060 px |
 
-> **⚠️ Importante**: Los valores de `overlap` y `margin` son aproximados de partida. El solapamiento real depende de la colocación física de las cámaras, por lo que puede ser necesario ajustarlos manualmente tras la calibración. Los valores de `margin_x` y `margin_y` (por defecto `30` y `10`) no escalan de forma crítica con la resolución.
+> ⚠️ Los valores de `overlap_start/end` son un punto de partida. El solapamiento real depende de la colocación física de las cámaras y puede necesitar ajuste fino.
 
-> **⚠️ Recuerda**: Si cambias la resolución de captura, los archivos `.yaml` de calibración (`cam_1_calibration.yaml`, `cam_2_calibration.yaml` y `board_homography.yaml`) **deben ser recalculados a esa nueva resolución**. Reutilizar calibraciones de otra resolución romperá la fusión.
+> ℹ️ El `camera_reader_cpp_node` arranca por defecto a **1080p** y el nodo de fusión a **480p**. Ajusta siempre ambos a la resolución a la que se hicieron las calibraciones.
 
 ---
 
