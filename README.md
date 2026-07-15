@@ -49,6 +49,33 @@ Para ello, el nodo en C++ expone el parámetro `config_dir`. Al lanzar el nodo o
 
 ---
 
+## Tabla de Resoluciones de Referencia
+
+La resolución final de la panorámica **depende de toda la cadena desde el principio**: la calibración intrínseca y la calibración estéreo deben hacerse a la misma resolución que se configure en el nodo de fusión. Si se cambia la resolución, hay que **recalibrar todo desde cero**.
+
+Los parámetros del nodo de fusión que dependen de la resolución son:
+
+| Parámetro | Descripción |
+|---|---|
+| `cam_w` / `cam_h` | Resolución física de captura de cada cámara por USB (debe coincidir con la resolución de calibración) |
+| `canvas_w` / `canvas_h` | Tamaño del lienzo interno de trabajo (aprox. el doble de ancho que la cámara) |
+| `overlap_start` / `overlap_end` | Zona de blending en píxeles X sobre el lienzo (zona central donde se solapan ambas cámaras) |
+| `margin_x` / `margin_y` | Márgenes en píxeles para recortar los bordes negros del resultado final |
+
+### Configuraciones Probadas
+
+| Resolución cámara | `cam_w` | `cam_h` | `canvas_w` | `canvas_h` | `overlap_start` | `overlap_end` | Panorámica aprox. |
+|---|---|---|---|---|---|---|---|
+| **480p** *(por defecto)* | `640` | `480` | `1100` | `480` | `475` | `525` | ~1040 × 460 px |
+| **720p** | `1280` | `720` | `2200` | `720` | `950` | `1050` | ~2100 × 700 px |
+| **1080p** | `1920` | `1080` | `3300` | `1080` | `1425` | `1575` | ~3150 × 1060 px |
+
+> **⚠️ Importante**: Los valores de `overlap` y `margin` son aproximados de partida. El solapamiento real depende de la colocación física de las cámaras, por lo que puede ser necesario ajustarlos manualmente tras la calibración. Los valores de `margin_x` y `margin_y` (por defecto `30` y `10`) no escalan de forma crítica con la resolución.
+
+> **⚠️ Recuerda**: Si cambias la resolución de captura, los archivos `.yaml` de calibración (`cam_1_calibration.yaml`, `cam_2_calibration.yaml` y `board_homography.yaml`) **deben ser recalculados a esa nueva resolución**. Reutilizar calibraciones de otra resolución romperá la fusión.
+
+---
+
 ## Despliegue y Uso
 
 ### Compilación
@@ -93,7 +120,13 @@ ros2 run camera_fusion_cpp_pkg camera_reader_cpp_node
 **Fusión Panorámica:**
 El sistema completo ha sido refactorizado a un nodo monolítico en C++ que realiza la captura desde hardware y la fusión en un único proceso, consiguiendo evitar los cuellos de botella de red DDS (Zero-Copy).
 ```bash
-ros2 launch camera_fusion_pkg fusionasincrona.launch.py
+ros2 launch camera_fusion_pkg camfusion.launch.py
+```
+
+**Cambio de Cámara (GUI):**
+En caso de necesitar intercambiar el orden de las cámaras en caliente, puedes lanzar la interfaz gráfica ejecutando el siguiente comando:
+```bash
+python3 src/camera_fusion_cpp_pkg/scripts/camera_swap_gui.py
 ```
 
 ### 4. Despliegue Experimental: Múltiples Cámaras (N-Cámaras)

@@ -24,7 +24,6 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'camera_reader_node = camera_fusion_pkg.camera_reader_node:main'
         ],
     },
 )
