@@ -64,11 +64,13 @@ Los parámetros del nodo de fusión que dependen de la resolución son:
 
 ### Configuraciones Probadas
 
-| Resolución cámara | `cam_w` | `cam_h` | `canvas_w` | `canvas_h` | `overlap_start` | `overlap_end` | Panorámica aprox. |
-|---|---|---|---|---|---|---|---|
-| **480p** *(por defecto)* | `640` | `480` | `1100` | `480` | `475` | `525` | ~1040 × 460 px |
-| **720p** | `1280` | `720` | `2200` | `720` | `950` | `1050` | ~2100 × 700 px |
-| **1080p** | `1920` | `1080` | `3300` | `1080` | `1425` | `1575` | ~3150 × 1060 px |
+| Parámetro | **480p** *(defecto)* | **720p** | **1080p** |
+|---|---|---|---|
+| `cam_w` × `cam_h` | 640 × 480 | 1280 × 720 | 1920 × 1080 |
+| `canvas_w` × `canvas_h` | 1100 × 480 | 2200 × 720 | 3300 × 1080 |
+| `overlap_start` | 475 | 950 | 1425 |
+| `overlap_end` | 525 | 1050 | 1575 |
+| Panorámica aprox. | ~1040 × 460 px | ~2100 × 700 px | ~3150 × 1060 px |
 
 > **⚠️ Importante**: Los valores de `overlap` y `margin` son aproximados de partida. El solapamiento real depende de la colocación física de las cámaras, por lo que puede ser necesario ajustarlos manualmente tras la calibración. Los valores de `margin_x` y `margin_y` (por defecto `30` y `10`) no escalan de forma crítica con la resolución.
 
