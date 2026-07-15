@@ -51,24 +51,24 @@ Para ello, el nodo en C++ expone el parámetro `config_dir`. Al lanzar el nodo o
 
 ## Tabla de Resoluciones de Referencia
 
-Todos los pasos de la cadena deben ejecutarse a la **misma resolución**. Si cambias la resolución, debes recalibrar desde cero. Usa esta tabla como referencia completa:
+Todos los pasos de la cadena deben ejecutarse a la **misma resolución**. Si cambias la resolución, debes recalibrar desde cero.
+
+Los archivos generados por las calibraciones son siempre los mismos independientemente de la resolución: `cam_1_calibration.yaml`, `cam_2_calibration.yaml` y `board_homography.yaml`.
 
 | Parámetro | **480p** | **720p** | **1080p** |
-|---|---|---|---|
+|---|:---:|:---:|:---:|
 | **① `camera_reader` — streaming durante calibración** | | | |
 | `width` × `height` | 640 × 480 | 1280 × 720 | 1920 × 1080 |
 | **② Calibración intrínseca** (`calibrar`) | | | |
-| Resolución del stream al calibrar | 640 × 480 | 1280 × 720 | 1920 × 1080 |
-| Archivos generados | `cam_1_calibration.yaml` `cam_2_calibration.yaml` | ← ídem | ← ídem |
+| Resolución del stream | 640 × 480 | 1280 × 720 | 1920 × 1080 |
 | **③ Calibración estéreo** (`calibrar_estereo`) | | | |
-| Resolución del stream al calibrar | 640 × 480 | 1280 × 720 | 1920 × 1080 |
-| Archivo generado | `board_homography.yaml` | ← ídem | ← ídem |
+| Resolución del stream | 640 × 480 | 1280 × 720 | 1920 × 1080 |
 | **④ Nodo de fusión** (`camera_fusion_cpp_node`) | | | |
 | `cam_w` × `cam_h` | 640 × 480 | 1280 × 720 | 1920 × 1080 |
 | `canvas_w` × `canvas_h` | 1100 × 480 | 2200 × 720 | 3300 × 1080 |
 | `overlap_start` | 475 | 950 | 1425 |
 | `overlap_end` | 525 | 1050 | 1575 |
-| **Resultado final aprox.** | ~1040 × 460 px | ~2100 × 700 px | ~3150 × 1060 px |
+| **Resultado final aprox.** | 1040 × 460 px | 2100 × 700 px | 3150 × 1060 px |
 
 > ⚠️ Los valores de `overlap_start/end` son un punto de partida. El solapamiento real depende de la colocación física de las cámaras y puede necesitar ajuste fino.
 
