@@ -1,0 +1,79 @@
+# params.yaml — Configuración del nodo de fusión panorámica de cámaras
+# ─────────────────────────────────────────────────────────────────────
+# Todos los parámetros de este archivo se pueden cambiar sin recompilar.
+#
+# NOTA IMPORTANTE SOBRE RESOLUCIONES:
+# Si cambias cam_w / cam_h, los archivos de calibración (.yaml de K, D y
+# la homografía) DEBEN haber sido recalculados expresamente para esa
+# resolución nueva. Mezclar resoluciones romperá la fusión.
+
+/autobus/camaras/panoramic_fusion:
+  ros__parameters:
+
+    # ── Captura de Hardware ──────────────────────────────────────────────────
+    # Tasa de frames por segundo solicitada al driver V4L2.
+    fps: 30
+
+    # Resolución física de captura USB (V4L2).
+    # Los mapas de calibración (K, D, H) DEBEN coincidir con esta resolución.
+    #
+    # Opciones de referencia (elegir solo una y calibrar para ella):
+    #
+    #   480p  → cam_w: 640,  cam_h: 480   (por defecto, menor carga CPU)
+    #   720p  → cam_w: 1280, cam_h: 720   (mayor detalle, mayor latencia USB)
+    #   1080p → cam_w: 1920, cam_h: 1080  (máxima calidad, requiere USB 3.0)
+    #
+    cam_w: 640
+    cam_h: 480
+
+    # ── Lienzo interno de composición ───────────────────────────────────────
+    # Tamaño del "canvas" matemático sobre el que se warpean las dos cámaras
+    # antes de recortar la zona válida.
+    # Debe ser lo suficientemente grande para contener ambas proyecciones.
+    #
+    # Valores de referencia según resolución de captura:
+    #   480p  → canvas_w: 1100, canvas_h: 480
+    #   720p  → canvas_w: 2200, canvas_h: 720
+    #   1080p → canvas_w: 3300, canvas_h: 1080
+    #
+    canvas_w: 1100
+    canvas_h: 480
+
+    # ── Zona de Difuminado (Alpha Blending) ─────────────────────────────────
+    # Columnas X (en píxeles del lienzo) donde empieza y termina la transición
+    # suave entre las dos cámaras. Ajustar si aparece una línea de corte visible.
+    #
+    # Valores de referencia según resolución de captura:
+    #   480p  → overlap_start: 475,  overlap_end: 525
+    #   720p  → overlap_start: 950,  overlap_end: 1050
+    #   1080p → overlap_start: 1425, overlap_end: 1575
+    #
+    overlap_start: 475
+    overlap_end:   525
+
+    # ── Publicación de Feeds Individuales ───────────────────────────────────
+    # Resolución a la que se publican los topics cam_1/image_raw y cam_2/image_raw.
+    # Se puede reducir independientemente del canvas para ahorrar ancho de banda.
+    # Poner a 0 para desactivar el reescalado y publicar a resolución nativa.
+    indiv_resize_w: 640
+    indiv_resize_h: 480
+
+    # ── Márgenes de Recorte Anti-Bordes Negros ───────────────────────────────
+    # Píxeles que se descartan en cada borde de la imagen panorámica final
+    # para eliminar las zonas negras producidas por el warping de perspectiva.
+    margin_x: 30
+    margin_y: 10
+
+    # ── Interpolación OpenCV ─────────────────────────────────────────────────
+    # Algoritmo de interpolación para cv::remap. Valores OpenCV:
+    #   1 = INTER_LINEAR  (equilibrio calidad/velocidad, recomendado)
+    #   2 = INTER_CUBIC   (mayor calidad, más lento)
+    #   0 = INTER_NEAREST (más rápido, menor calidad)
+    interp: 1
+
+    # ── Orden de Cámaras ─────────────────────────────────────────────────────
+    # Si el sistema operativo asigna /dev/video0 a la cámara de la derecha
+    # y /dev/video1 a la de la izquierda (orden físico invertido), activar
+    # esta opción para que el nodo las intercambie automáticamente al arrancar.
+    # También se puede cambiar en caliente con el servicio /camera_fusion/swap_cameras.
+    swap_default: false

@@ -29,6 +29,16 @@ install(TARGETS
   DESTINATION lib/${PROJECT_NAME}
 )
 
+install(DIRECTORY config
+  DESTINATION share/${PROJECT_NAME}
+)
+
+install(DIRECTORY
+  ${CMAKE_CURRENT_SOURCE_DIR}/../camera_fusion_pkg/launch
+  DESTINATION share/${PROJECT_NAME}
+  OPTIONAL
+)
+
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
   # the following line skips the linter which checks for copyrights

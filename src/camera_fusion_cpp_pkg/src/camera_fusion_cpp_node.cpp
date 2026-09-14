@@ -39,46 +39,30 @@ public:
     {
         // ---------------------------------------------------------------------
         // 1. Declaración de parámetros ROS
+        //    Valores por defecto: se sobreescriben desde config/params.yaml
         // ---------------------------------------------------------------------
-        this->declare_parameter("fps", 30);
-        
-        // Valores del área de solapamiento (blending) de ambas cámaras
-        this->declare_parameter("overlap_start", 475);
-        this->declare_parameter("overlap_end", 525);
-        
-        // Valores para el tamaño interno del lienzo de trabajo
-        // (Ejemplo alternativo para 720p : canvas_w=2200, canvas_h=720,  overlap=950-1050)
-        // (Ejemplo alternativo para 1080p: canvas_w=3300, canvas_h=1080, overlap=1425-1575)
-        this->declare_parameter("canvas_w", 1100);
-        this->declare_parameter("canvas_h", 480);
-        
-        // Valores a los que se capturan físicamente las imágenes desde el USB
-        // ¡IMPORTANTE!: Si cambias cam_w y cam_h a 1280x720 o 1920x1080, los archivos 
-        // .yaml de calibración (intrínsecos y homografía) DEBEN haber sido calculados
-        // expresamente para esa nueva resolución, o la fusión se romperá por completo.
-        this->declare_parameter("cam_w", 640);
-        this->declare_parameter("cam_h", 480);
-        this->declare_parameter("interp", static_cast<int>(cv::INTER_LINEAR));
-        
-        // Resolución para la publicación de las cámaras individuales por separado
+        this->declare_parameter("fps",            30);
+        this->declare_parameter("overlap_start",  475);
+        this->declare_parameter("overlap_end",    525);
+        this->declare_parameter("canvas_w",       1100);
+        this->declare_parameter("canvas_h",       480);
+        this->declare_parameter("cam_w",          640);
+        this->declare_parameter("cam_h",          480);
+        this->declare_parameter("interp",         static_cast<int>(cv::INTER_LINEAR));
         this->declare_parameter("indiv_resize_w", 640);
         this->declare_parameter("indiv_resize_h", 480);
-        
+        this->declare_parameter("margin_x",       30);
+        this->declare_parameter("margin_y",       10);
+        this->declare_parameter("swap_default",   true);
+
+        // Directorio donde se buscan cam_1_calibration.yaml, cam_2_calibration.yaml y board_homography.yaml
         std::string default_config;
         try {
             default_config = ament_index_cpp::get_package_share_directory("camera_fusion_pkg") + "/config";
         } catch (const std::exception& e) {
             default_config = std::string(std::getenv("HOME")) + "/fusiones_ws/src/camera_fusion_pkg/config";
         }
-        
         this->declare_parameter("config_dir", default_config);
-        
-        // Márgenes para el recorte de zonas negras en los bordes
-        this->declare_parameter("margin_x", 30);
-        this->declare_parameter("margin_y", 10);
-        
-        // Invertir automáticamente las cámaras al inicio si el hardware las asigna al revés
-        this->declare_parameter("swap_default", true);
 
         // --- Lectura de parámetros a variables miembro ---
         fps_            = this->get_parameter("fps").as_int();
@@ -94,6 +78,7 @@ public:
         int margin_x    = this->get_parameter("margin_x").as_int();
         int margin_y    = this->get_parameter("margin_y").as_int();
         std::string config_dir = this->get_parameter("config_dir").as_string();
+
 
         // ---------------------------------------------------------------------
         // 2. Carga de Datos de Calibración
@@ -490,14 +475,18 @@ private:
             capture_threads_.emplace_back(&PanoramicFusionCppNode::capture_thread_func, this, cam);
         }
 
-        if (cameras_.size() < 2) {
-            RCLCPP_ERROR(this->get_logger(), "No se encontraron 2 cámaras válidas.");
+        if (cameras_.size() == 0) {
+            RCLCPP_ERROR(this->get_logger(), "No se encontraron cámaras válidas.");
+        } else if (cameras_.size() == 1) {
+            RCLCPP_INFO(this->get_logger(), "[Modo 1 cámara] Iniciando publicación directa con undistort.");
+            build_camera_info_single();
+            fusion_thread_ = std::thread(&PanoramicFusionCppNode::single_cam_worker, this);
         } else {
             if (this->get_parameter("swap_default").as_bool()) {
                 std::swap(cameras_[0], cameras_[1]);
                 RCLCPP_INFO(this->get_logger(), "Cámaras intercambiadas automáticamente (swap_default=true).");
             }
-            RCLCPP_INFO(this->get_logger(), "Cámaras enlazadas. Iniciando fusión directa (Hardware-Synced).");
+            RCLCPP_INFO(this->get_logger(), "[Modo 2 cámaras] Iniciando fusión panorámica (Hardware-Synced).");
             fusion_thread_ = std::thread(&PanoramicFusionCppNode::fusion_worker, this);
         }
     }
@@ -595,6 +584,90 @@ private:
 
             do_fusion();
         }
+    }
+
+    /**
+     * @brief Tarea para modo cámara única: aplica undistort y publica directamente en el topic panorámico.
+     * @details Reutiliza el mismo mecanismo de condition_variable que el modo dual para despertar
+     *          en cada fotograma nuevo, pero no aplica homografía ni alpha blending.
+     */
+    void single_cam_worker()
+    {
+        cv::Mat undistorted;
+        while (running_ && rclcpp::ok()) {
+            // Espera al trigger del capture_thread de la única cámara
+            std::unique_lock<std::mutex> lock(fusion_mutex_);
+            fusion_cv_.wait(lock, [this]() { return new_frame_ready_ || !running_; });
+            if (!running_) break;
+            new_frame_ready_ = false;
+            lock.unlock();
+
+            cv::Mat frame;
+            {
+                std::lock_guard<std::mutex> lock1(cameras_[0]->frame_mutex);
+                if (cameras_[0]->latest_frame.empty()) continue;
+                frame = cameras_[0]->latest_frame; // Referencia O(1), sin clone
+            }
+            cameras_[0]->is_fresh.exchange(false);
+
+            // Undistort con los mapas ya precalculados de K1/D1 (sin homografía, sin blending)
+            cv::remap(frame, undistorted, map1x_, map1y_, interp_);
+
+            // Publica feed individual de la cámara (para grabación, SLAM, etc.)
+            publish_camera(cameras_[0], frame);
+
+            // Publica en el topic panorámico unificado para que el resto del sistema
+            // no distinga si hay 1 o 2 cámaras
+            auto out_msg            = std::make_unique<sensor_msgs::msg::Image>();
+            auto stamp              = this->now();
+            out_msg->header.stamp   = stamp;
+            out_msg->header.frame_id = "panoramic_link";
+            out_msg->height         = undistorted.rows;
+            out_msg->width          = undistorted.cols;
+            out_msg->encoding       = "bgr8";
+            out_msg->is_bigendian   = false;
+            out_msg->step           = undistorted.cols * 3;
+            out_msg->data.resize(out_msg->step * out_msg->height);
+            memcpy(out_msg->data.data(), undistorted.data, out_msg->data.size());
+            pub_->publish(std::move(out_msg));
+
+            cam_info_msg_.header.stamp = stamp;
+            cam_info_pub_->publish(cam_info_msg_);
+        }
+    }
+
+    /**
+     * @brief Construye y publica el CameraInfo para el modo de cámara única.
+     * @details Usa K1_ directamente, sin offset de recorte de fusión. La imagen
+     *          de salida es cam_w_ x cam_h_ (dimensiones reales de captura undistorsionada).
+     */
+    void build_camera_info_single()
+    {
+        double fx = K1_.at<double>(0, 0);
+        double fy = K1_.at<double>(1, 1);
+        double cx = K1_.at<double>(0, 2);
+        double cy = K1_.at<double>(1, 2);
+
+        cam_info_msg_.header.frame_id  = "panoramic_link";
+        cam_info_msg_.width            = static_cast<uint32_t>(cam_w_);
+        cam_info_msg_.height           = static_cast<uint32_t>(cam_h_);
+        cam_info_msg_.distortion_model = "plumb_bob";
+        cam_info_msg_.d                = {0.0, 0.0, 0.0, 0.0, 0.0};
+        cam_info_msg_.k = { fx,  0.0,  cx,
+                             0.0,  fy,  cy,
+                             0.0, 0.0, 1.0 };
+        cam_info_msg_.r = { 1.0, 0.0, 0.0,
+                             0.0, 1.0, 0.0,
+                             0.0, 0.0, 1.0 };
+        cam_info_msg_.p = { fx,  0.0,  cx, 0.0,
+                             0.0,  fy,  cy, 0.0,
+                             0.0, 0.0, 1.0, 0.0 };
+        cam_info_msg_.header.stamp = this->now();
+        cam_info_pub_->publish(cam_info_msg_);
+
+        RCLCPP_INFO(this->get_logger(),
+            "[CameraInfo única] %dx%d | fx=%.2f fy=%.2f cx=%.2f cy=%.2f",
+            cam_w_, cam_h_, fx, fy, cx, cy);
     }
 
     /**

@@ -1,7 +1,8 @@
 from launch import LaunchDescription
 from launch_ros.actions import Node
 from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
@@ -12,12 +13,14 @@ def generate_launch_description():
     )
     namespace = LaunchConfiguration('namespace')
 
-    swap_arg = DeclareLaunchArgument(
-        'swap_cameras',
-        default_value='true',
-        description='Invierte automáticamente el orden de las cámaras si el USB las asigna al revés'
-    )
-    swap_cameras = LaunchConfiguration('swap_cameras')
+    # El params.yaml del paquete C++ sobreescribe los defaults del nodo.
+    # swap_default dentro del yaml puede seguir cambiándose en caliente con
+    # el servicio /camera_fusion/swap_cameras o desde la GUI.
+    params_file = PathJoinSubstitution([
+        FindPackageShare('camera_fusion_cpp_pkg'),
+        'config',
+        'params.yaml'
+    ])
 
     fusion_node = Node(
         package='camera_fusion_cpp_pkg',
@@ -25,13 +28,10 @@ def generate_launch_description():
         name='panoramic_fusion',
         namespace=namespace,
         output='screen',
-        parameters=[{
-            'swap_default': swap_cameras
-        }]
+        parameters=[params_file]
     )
 
     return LaunchDescription([
         namespace_arg,
-        swap_arg,
         fusion_node,
     ])
