@@ -42,7 +42,7 @@ ros2 run camera_calibration cameracalibrator \
     -r right_camera:=/cam_2
 
 # Una vez cerrado, mover el archivo generado a la carpeta config
-CONFIG_DIR="$(pwd)/src/camera_fusion_pkg/config"
+CONFIG_DIR="${HOME}/ROCIN-FollowMe/followme_ws/src/camera_fusion_pkg/config"
 mkdir -p "${CONFIG_DIR}"
 
 if [ -f "/tmp/calibrationdata.tar.gz" ]; then

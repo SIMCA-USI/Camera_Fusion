@@ -9,7 +9,7 @@ GRID_SIZE=${3:-"9x6"}
 SQUARE_SIZE=${4:-"0.04"}
 
 # Directorio donde se guardarán las configuraciones (dentro del paquete)
-CONFIG_DIR="$(pwd)/src/camera_fusion_pkg/config"
+CONFIG_DIR="${HOME}/ROCIN-FollowMe/followme_ws/src/camera_fusion_pkg/config"
 mkdir -p "${CONFIG_DIR}"
 
 echo "================================================="

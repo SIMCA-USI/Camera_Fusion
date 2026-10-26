@@ -1,151 +1,96 @@
-# Multi-Camera Panoramic Fusion (ROS 2)
+<div align="center">
+  <h1>📸 Multi-Camera Panoramic Fusion (ROS 2)</h1>
+  <p>Fusión panorámica sin interrupciones (seamless stitching) en tiempo real para múltiples cámaras web USB.</p>
+</div>
 
-Este repositorio contiene un sistema completo en ROS 2 diseñado para la adquisición, calibración y fusión en tiempo real de múltiples cámaras (webcams USB) con el objetivo de generar una única vista panorámica sin interrupciones visuales (seamless stitching). El proyecto está desarrollado bajo un estándar de investigación en C++ para garantizar alto rendimiento y cero latencia.
+## 📖 Explicación del Paquete
 
-## Fundamentos Teóricos y Flujo de Trabajo
+Este paquete en **C++ para ROS 2** proporciona un sistema de adquisición de vídeo de alto rendimiento. Mediante el uso de matrices de calibración intrínseca (corrección de lente) y calibración estéreo (matrices de homografía), el sistema une múltiples flujos de vídeo solapados para generar una única imagen panorámica continua.
 
-La fusión de cámaras requiere un proceso riguroso de calibración geométrica para corregir las aberraciones de las lentes y alinear los sistemas de coordenadas espaciales. El sistema se divide en tres fases conceptuales:
-
-### 1. Calibración Intrínseca (Corrección de Lente)
-**¿Por qué se hace?** Las lentes introducen distorsiones que curvan las líneas rectas. Además, cada cámara tiene un "centro óptico" y una "distancia focal" únicos. Mediante la observación de un patrón conocido (tablero de ajedrez), el algoritmo estima la **Matriz de la Cámara ($K$)** y los **Coeficientes de Distorsión ($D$)**. El nodo de fusión utiliza estos datos para rectificar matemáticamente cada imagen antes de intentar unirlas.
-
-<!-- TODO: Insertar imagen representativa de una cámara mostrando el tablero de calibración intrínseca -->
-![Calibración Intrínseca](docs/images/calibracion_intrinseca.png)
-
-### 2. Calibración Estéreo (Alineación Espacial)
-**¿Por qué se hace?** Para unir dos imágenes, necesitamos saber exactamente dónde está físicamente una cámara con respecto a la otra. La calibración estéreo analiza cómo ambas cámaras ven el mismo patrón en el espacio 3D simultáneamente, extrayendo la matriz de rotación relativa.
-
-<!-- TODO: Insertar imagen representativa de ambas cámaras viendo el mismo tablero en el área de solape -->
-![Calibración Estéreo](docs/images/calibracion_estereo.png)
-
-### 3. Fusión por Homografía y Blending
-Con las cámaras rectificadas y su relación rotacional conocida, calculamos una **Matriz de Homografía ($H$)**. Esta matriz proyecta la imagen de la cámara derecha sobre el plano coordenado de la cámara izquierda. Finalmente, para evitar un corte duro en la unión, el nodo aplica un algoritmo de **Linear Blending** enfocado en la Región de Interés (ROI) de solape.
-
-<!-- TODO: Insertar imagen mostrando el resultado final de la vista panorámica fusionada -->
-![Fusión y Blending](docs/images/fusion_panoramica.png)
+### Arquitectura de Software
+- **Lectura Hardware Dedicada:** Hilos de captura individuales por cámara separan la orden de captura (`grab`) de la lectura (`retrieve`) en el driver V4L2. Esto evita la saturación del bus USB.
+- **Zero-Copy Fusion:** Los hilos de lectura escriben la imagen en una memoria compartida directamente accesible por el bucle de fusión principal (OpenCV), eliminando por completo la latencia de enviar imágenes entre nodos a través de la red ROS (DDS).
+- **Adaptabilidad Dinámica:** Admite funcionar con una sola cámara (simplemente rectifica y publica) o con múltiples cámaras aplicando *alpha-blending* para ocultar los cortes.
+- **Preservación Total de Campo de Visión ($\alpha = 1.0$):**
+  Flujo: *Calibrar $\rightarrow$ Fusionar $\rightarrow$ Recortar*. Retiene el 100% de los píxeles capturados por el sensor óptico mediante matrices de cámara óptimas (`cv::getOptimalNewCameraMatrix`). Las dos cámaras se proyectan completas en el lienzo panorámico y se realiza un único recorte de márgenes válidos (`crop`) al final sobre la panorámica combinada, evitando la pérdida de ángulos. Cuenta con `auto_adjust_homography: true` para adaptar analíticamente la homografía de calibraciones previas sin requerir recalibrar.
 
 ---
 
-## Configuración del Entorno y Alias
+## ⚙️ Parámetros y Resoluciones
 
-Para facilitar el uso repetitivo de las herramientas, es muy recomendable configurar unos alias en el archivo `.bashrc` y añadir los comandos de entorno correspondientes de tus *workspaces*. 
+Toda la configuración se realiza desde el archivo [`config/params.yaml`](config/params.yaml) sin necesidad de recompilar el código.
 
-Puedes añadir todo automáticamente ejecutando el siguiente bloque en tu terminal (asegúrate de que las rutas coinciden con la ubicación real de tus directorios):
+### Resoluciones de Referencia
+Dependiendo del hardware disponible, puedes ajustar la resolución del sistema basándote en esta tabla. **Nota:** el `canvas_w` (lienzo) debe ser lo bastante grande para albergar las imágenes proyectadas de todas las cámaras.
 
-```bash
-echo "alias calibrar='bash ~/ros2_ws/src/camera_fusion_pkg/scripts/calibrate_camera.sh'" >> ~/.bashrc
-echo "alias calibrar_estereo='bash ~/ros2_ws/src/camera_fusion_pkg/scripts/calibrar_estereo.sh'" >> ~/.bashrc
-echo "alias listar_camaras='bash ~/ros2_ws/src/camera_fusion_pkg/scripts/listar_camaras.sh'" >> ~/.bashrc
-source ~/.bashrc
-```
+| Modo de Calidad | `cam_w` × `cam_h` (Captura) | `canvas_w` × `canvas_h` (Lienzo) | Rango de Solape (`overlap_start` - `end`) |
+|-----------------|-----------------------------|----------------------------------|-------------------------------------------|
+| **480p** (Bajo) | `640` × `480`               | `1100` × `480`                   | `475` - `525`                             |
+| **720p** (Medio)| `1280` × `720`              | `2200` × `720`                   | `950` - `1050`                            |
+| **1080p** (Alto)| `1920` × `1080`             | `3300` × `1080`                  | `1425` - `1575`                           |
 
-## Rutas de Calibración y Archivos YAML
-
-El nodo principal de fusión lee los parámetros de calibración desde archivos `.yaml`. Por defecto, el programa asume que estos archivos se encuentran en:
-`/home/$USER/ros2_ws/src/camera_fusion_pkg/config/`
-
-Si despliegas este proyecto en otra máquina, otro usuario, o en un directorio distinto, **debes actualizar la ruta de configuración**. 
-Para ello, el nodo en C++ expone el parámetro `config_dir`. Al lanzar el nodo o al modificar el archivo de lanzamiento (launch file), debes configurar el parámetro `config_dir` pasándole la ruta absoluta donde se generen y guarden los archivos `.yaml` de calibración.
+> [!WARNING]  
+> **Requisito crítico:** Las matrices matemáticas de calibración ($K$, $D$ y $H$) están estrictamente atadas a la resolución en píxeles. **Si cambias la resolución física de captura (`cam_w` / `cam_h`), es obligatorio realizar de nuevo todo el proceso de calibración.**
 
 ---
 
-## Tabla de Resoluciones de Referencia
+## 🚀 Despliegue
 
-Todos los pasos de la cadena deben ejecutarse a la **misma resolución**. Si cambias la resolución, debes recalibrar desde cero.
+### 0. Alias de Terminal
+Añade a `~/.bashrc` (una sola vez) y ejecuta `source ~/.bashrc`:
+```bash
+alias calibrar='bash ~/ROCIN-FollowMe/followme_ws/src/camera_fusion_pkg/scripts/calibrate_camera.sh'
+alias calibrar_estereo='bash ~/ROCIN-FollowMe/followme_ws/src/camera_fusion_pkg/scripts/calibrar_estereo.sh'
+alias listar_camaras='bash ~/ROCIN-FollowMe/followme_ws/src/camera_fusion_pkg/scripts/listar_camaras.sh'
+```
+Los scripts guardan siempre los resultados en `camera_fusion_pkg/config/`, sin importar desde qué directorio se lancen. Usa `listar_camaras` para ver qué `/dev/video*` funciona.
 
-Los archivos generados por las calibraciones son siempre los mismos independientemente de la resolución: `cam_1_calibration.yaml`, `cam_2_calibration.yaml` y `board_homography.yaml`.
+### 1. Fase de Calibración
+Antes de ejecutar el sistema de fusión, es necesario calibrar las lentes de cada cámara y su posición relativa espacial mediante un patrón de tablero de ajedrez (*checkerboard*).
 
-| Parámetro | **480p** | **720p** | **1080p** |
-|---|:---:|:---:|:---:|
-| **① `camera_reader` — streaming durante calibración** | | | |
-| `width` × `height` | 640 × 480 | 1280 × 720 | 1920 × 1080 |
-| **② Calibración intrínseca** (`calibrar`) | | | |
-| Resolución del stream | 640 × 480 | 1280 × 720 | 1920 × 1080 |
-| **③ Calibración estéreo** (`calibrar_estereo`) | | | |
-| Resolución del stream | 640 × 480 | 1280 × 720 | 1920 × 1080 |
-| **④ Nodo de fusión** (`camera_fusion_cpp_node`) | | | |
-| `cam_w` × `cam_h` | 640 × 480 | 1280 × 720 | 1920 × 1080 |
-| `canvas_w` × `canvas_h` | 1100 × 480 | 2200 × 720 | 3300 × 1080 |
-| `overlap_start` | 475 | 950 | 1425 |
-| `overlap_end` | 525 | 1050 | 1575 |
-| **Resultado final aprox.** | 1040 × 460 px | 2100 × 700 px | 3150 × 1060 px |
+> [!NOTE]
+> **Sobre las dimensiones del tablero:**
+> En los comandos a continuación verás los argumentos `<INTERSECCIONES>` y `<TAMAÑO_M>`. 
+> - **Intersecciones (Ej. `9x6`)**: Es el número de *vértices internos* del tablero (cuadrados totales menos uno por lado).
+> - **Tamaño (Ej. `0.0404`)**: Es la longitud del lado de un solo cuadrado impreso, medida en metros (40.4 mm en este caso).
+> **Debes cambiar estos dos valores** en los comandos de abajo para que coincidan matemáticamente con tu tablero impreso, de lo contrario las distancias espaciales serán erróneas.
 
-> ⚠️ Los valores de `overlap_start/end` son un punto de partida. El solapamiento real depende de la colocación física de las cámaras y puede necesitar ajuste fino.
+#### A. Calibración Intrínseca (Individual)
+Permite corregir las aberraciones de ojo de pez o deformaciones de cada lente. **Debe ejecutarse una vez por cámara.**
 
-> ℹ️ El `camera_reader_cpp_node` arranca por defecto a **1080p** y el nodo de fusión a **480p**. Ajusta siempre ambos a la resolución a la que se hicieron las calibraciones.
+1. Lanza el orquestador de calibración monocular para la `cam_1`:
+   ```bash
+   # Sintaxis: script <nombre_cam> <topic> <intersecciones> <tamaño_m>
+   calibrar cam_1 /cam_1/image_raw 9x6 0.0404
+   ```
+2. Mueve el tablero delante de la cámara en varios ángulos hasta que los medidores (X, Y, Size, Skew) estén en verde.
+3. Haz clic en **CALIBRATE** y luego en **SAVE**.
+4. Repite el proceso exacto cambiando `cam_1` a `cam_2` (y el topic a `/cam_2/image_raw`).
+
+#### B. Calibración Estéreo (Homografía)
+Establece la relación geométrica entre las dos cámaras. **Ambas cámaras deben estar ya ancladas a su soporte final, sin posibilidad de moverse.**
+
+1. Inicia el script de cálculo de homografía:
+   ```bash
+   # Sintaxis: script <intersecciones> <tamaño_m> <topic_izq> <topic_der>
+   calibrar_estereo 9x6 0.0404 /cam_1/image_raw /cam_2/image_raw
+   ```
+2. Coloca el tablero de ajedrez en la zona central donde se solapan los campos de visión de ambas cámaras. **Ambas deben ver el tablero completo a la vez.**
+3. El sistema tomará muestras sincronizadas y generará un archivo `board_homography.yaml` en el directorio de configuración.
 
 ---
 
-## Despliegue y Uso
+### 2. Fase de Lanzamiento (Producción)
 
-### Compilación
-Asegúrate de tener ROS 2 (Jazzy/Humble), OpenCV y la librería `yaml-cpp` instalados en la máquina de despliegue (`sudo apt update && sudo apt install libyaml-cpp-dev v4l-utils`).
-```bash
-cd ~/ros2_ws
-colcon build
-source install/setup.bash
-```
+Con todos los archivos YAML generados (`cam_1_calibration.yaml`, `cam_2_calibration.yaml`, `board_homography.yaml`), el sistema está listo para arrancar:
 
-### 1. Detección de Cámaras
-Para comprobar qué dispositivos de vídeo están disponibles y detectar el hardware:
-```bash
-listar_camaras
-```
-
-### 2. Calibración
-
-**A. Intrínseca (Por cada cámara):**
-```bash
-calibrar cam_1 /cam_1/image_raw 9x6 0.0404
-calibrar cam_2 /cam_2/image_raw 9x6 0.0404
-```
-
-**B. Estéreo (Matriz de Homografía):**
-Lanza ambas cámaras individualmente y ejecuta:
-```bash
-calibrar_estereo 9x6 0.0404 /cam_1/image_raw /cam_2/image_raw
-```
-
-### 3. Ejecución del Sistema
-
-**Visualización Recomendada:**
-Para visualizar correctamente el resultado de la fusión o los topics de vídeo individuales sin pérdida de rendimiento, se recomienda utilizar **RViz2**.
-
-**Lectura Individual de Cámaras:**
-Si necesitas revisar las cámaras por separado (por ejemplo, para depurar antes de la calibración), puedes lanzar el nodo lector nativo en C++:
-```bash
-ros2 run camera_fusion_cpp_pkg camera_reader_cpp_node
-```
-
-**Fusión Panorámica:**
-El sistema completo ha sido refactorizado a un nodo monolítico en C++ que realiza la captura desde hardware y la fusión en un único proceso, consiguiendo evitar los cuellos de botella de red DDS (Zero-Copy).
 ```bash
 ros2 launch camera_fusion_pkg camfusion.launch.py
 ```
 
-**Cambio de Cámara (GUI):**
-En caso de necesitar intercambiar el orden de las cámaras en caliente, puedes lanzar la interfaz gráfica ejecutando el siguiente comando:
+#### Visualización
+Para visualizar el resultado final sin saturar la red DDS local:
 ```bash
-python3 src/camera_fusion_cpp_pkg/scripts/camera_swap_gui.py
+rviz2
 ```
-
-### 4. Despliegue Experimental: Múltiples Cámaras (N-Cámaras)
-*Nota importante: Este modo se encuentra actualmente en proceso de pruebas experimentales.*
-
-Además de la fusión estándar de 2 cámaras, el repositorio incluye un modo en desarrollo para fusionar dinámicamente 3 o más cámaras mediante `multicams.launch.py`. La arquitectura utiliza una cámara "ancla" central hacia la que se proyectan las demás mediante calibraciones estéreo par a par.
-
----
-
-## Arquitectura del Software
-
-### Nodo Principal C++ (`camera_fusion_cpp_pkg`)
-* **`camera_fusion_cpp_node`**: Nodo de alto rendimiento en C++ 17/20. Sustituye a la antigua arquitectura distribuida en Python. 
-  - **Lectura Hardware Dedicada**: Implementa hilos de captura individuales por cámara, utilizando el patrón de lectura asíncrona V4L2 (`grab` y `retrieve` separados) para evitar la saturación del bus USB.
-  - **Detección Dinámica**: Identifica el hardware leyendo `/sys/class/video4linux/videoX/name` e ignora automáticamente las cámaras integradas para evitar conflictos de asignación.
-  - **Zero-Copy Fusion**: Los hilos de captura comparten memoria directamente con el bucle de fusión principal, eliminando la sobrecarga de publicación/suscripción.
-  - **Control Constante**: Publica estrictamente a la tasa configurada (por defecto 15 FPS) limitando el uso de CPU y asegurando determinismo en la red de comunicaciones.
-
-### Scripts de Soporte (`scripts/`)
-* **`listar_camaras.sh`**: Interactúa con el kernel para depurar dispositivos V4L2.
-* **`calibrate_camera.sh`**: Invocador automatizado del calibrador oficial de ROS 2 para corrección monocular.
-* **`calibrar_estereo.sh`**: Wrapper para invocar el nodo de calibración en modo estéreo asíncrono.
+*Suscríbete mediante un display tipo `Image` al topic:* `/carrito/followme/video_frames` (o `/autobus/camaras/panoramic_fusion/image_raw` según el namespace configurado).

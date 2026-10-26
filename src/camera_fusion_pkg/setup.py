@@ -14,13 +14,14 @@ setup(
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
         (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
+        (os.path.join('share', package_name, 'scripts'), glob('scripts/*')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
     maintainer='adrian',
-    maintainer_email='adrian@todo.todo',
+    maintainer_email='adriansanchezalcazar@gmail.com',
     description='Camera fusion project',
-    license='TODO: License declaration',
+    license='Apache-2.0',
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [

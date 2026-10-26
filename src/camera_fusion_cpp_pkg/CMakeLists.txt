@@ -33,6 +33,11 @@ install(DIRECTORY config
   DESTINATION share/${PROJECT_NAME}
 )
 
+install(PROGRAMS
+  scripts/camera_swap_gui.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 install(DIRECTORY
   ${CMAKE_CURRENT_SOURCE_DIR}/../camera_fusion_pkg/launch
   DESTINATION share/${PROJECT_NAME}

@@ -5,7 +5,7 @@
   <version>0.0.0</version>
   <description>Camera fusion project</description>
   <maintainer email="adrian@todo.todo">adrian</maintainer>
-  <license>TODO: License declaration</license>
+  <license>Apache-2.0</license>
 
   <depend>rclpy</depend>
   <depend>sensor_msgs</depend>

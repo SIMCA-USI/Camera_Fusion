@@ -2,9 +2,10 @@
  * @file camera_fusion_cpp_node.cpp
  * @brief Nodo de fusión panorámica monolítico en C++ puro (Zero-Delay, Zero-DDS-overhead).
  * 
- * Este nodo se encarga de capturar imágenes desde dos cámaras USB en paralelo,
- * alinearlas utilizando matrices de calibración intrínsecas y homografía,
- * y aplicar una transición (Alpha Blending) para crear una imagen panorámica continua.
+ * Este nodo captura imágenes desde dos cámaras USB en paralelo, preserva el 100% del campo
+ * de visión del sensor óptico mediante matrices de cámara óptimas (alpha=1.0), alinea las perspectivas
+ * mediante homografía, aplica una transición suave (Alpha Blending) y realiza un único recorte
+ * de márgenes útiles al final sobre el lienzo panorámico combinado (Calibrar -> Fusionar -> Recortar).
  */
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
@@ -41,44 +42,55 @@ public:
         // 1. Declaración de parámetros ROS
         //    Valores por defecto: se sobreescriben desde config/params.yaml
         // ---------------------------------------------------------------------
-        this->declare_parameter("fps",            30);
-        this->declare_parameter("overlap_start",  475);
-        this->declare_parameter("overlap_end",    525);
-        this->declare_parameter("canvas_w",       1100);
-        this->declare_parameter("canvas_h",       480);
-        this->declare_parameter("cam_w",          640);
-        this->declare_parameter("cam_h",          480);
-        this->declare_parameter("interp",         static_cast<int>(cv::INTER_LINEAR));
-        this->declare_parameter("indiv_resize_w", 640);
-        this->declare_parameter("indiv_resize_h", 480);
-        this->declare_parameter("margin_x",       30);
-        this->declare_parameter("margin_y",       10);
-        this->declare_parameter("swap_default",   true);
+        this->declare_parameter("fps",                    30);
+        this->declare_parameter("overlap_start",          475);
+        this->declare_parameter("overlap_end",            525);
+        this->declare_parameter("canvas_w",               1100);
+        this->declare_parameter("canvas_h",               480);
+        this->declare_parameter("cam_w",                  640);
+        this->declare_parameter("cam_h",                  480);
+        this->declare_parameter("interp",                 static_cast<int>(cv::INTER_LINEAR));
+        this->declare_parameter("indiv_resize_w",         640);
+        this->declare_parameter("indiv_resize_h",         480);
+        this->declare_parameter("margin_x",               30);
+        this->declare_parameter("margin_y",               10);
+        this->declare_parameter("swap_default",           true);
+        this->declare_parameter("alpha",                  1.0);
+        this->declare_parameter("auto_adjust_homography", true);
+        this->declare_parameter("output_topic",           "/carrito/followme/video_frames");
+        this->declare_parameter("cam_info_topic",         "/carrito/followme/camera_info");
 
         // Directorio donde se buscan cam_1_calibration.yaml, cam_2_calibration.yaml y board_homography.yaml
         std::string default_config;
         try {
             default_config = ament_index_cpp::get_package_share_directory("camera_fusion_pkg") + "/config";
         } catch (const std::exception& e) {
-            default_config = std::string(std::getenv("HOME")) + "/fusiones_ws/src/camera_fusion_pkg/config";
+            default_config = std::string(std::getenv("HOME")) + "/ROCIN-FollowMe/followme_ws/src/camera_fusion_pkg/config";
         }
         this->declare_parameter("config_dir", default_config);
 
         // --- Lectura de parámetros a variables miembro ---
-        fps_            = this->get_parameter("fps").as_int();
-        overlap_start_  = this->get_parameter("overlap_start").as_int();
-        overlap_end_    = this->get_parameter("overlap_end").as_int();
-        canvas_w_       = this->get_parameter("canvas_w").as_int();
-        canvas_h_       = this->get_parameter("canvas_h").as_int();
-        cam_w_          = this->get_parameter("cam_w").as_int();
-        cam_h_          = this->get_parameter("cam_h").as_int();
-        interp_         = this->get_parameter("interp").as_int();
-        indiv_resize_w_ = this->get_parameter("indiv_resize_w").as_int();
-        indiv_resize_h_ = this->get_parameter("indiv_resize_h").as_int();
-        int margin_x    = this->get_parameter("margin_x").as_int();
-        int margin_y    = this->get_parameter("margin_y").as_int();
-        std::string config_dir = this->get_parameter("config_dir").as_string();
+        fps_                    = this->get_parameter("fps").as_int();
+        overlap_start_          = this->get_parameter("overlap_start").as_int();
+        overlap_end_            = this->get_parameter("overlap_end").as_int();
+        canvas_w_               = this->get_parameter("canvas_w").as_int();
+        canvas_h_               = this->get_parameter("canvas_h").as_int();
+        cam_w_                  = this->get_parameter("cam_w").as_int();
+        cam_h_                  = this->get_parameter("cam_h").as_int();
+        interp_                 = this->get_parameter("interp").as_int();
+        indiv_resize_w_         = this->get_parameter("indiv_resize_w").as_int();
+        indiv_resize_h_         = this->get_parameter("indiv_resize_h").as_int();
+        int margin_x            = this->get_parameter("margin_x").as_int();
+        int margin_y            = this->get_parameter("margin_y").as_int();
+        alpha_                  = this->get_parameter("alpha").as_double();
+        auto_adjust_homography_ = this->get_parameter("auto_adjust_homography").as_bool();
+        output_topic_           = this->get_parameter("output_topic").as_string();
+        cam_info_topic_         = this->get_parameter("cam_info_topic").as_string();
+        std::string config_dir  = this->get_parameter("config_dir").as_string();
 
+        RCLCPP_INFO(this->get_logger(),
+            "Inicializando nodo de fusión panorámica con alpha=%.2f (auto_adjust_homography=%s)",
+            alpha_, auto_adjust_homography_ ? "true" : "false");
 
         // ---------------------------------------------------------------------
         // 2. Carga de Datos de Calibración
@@ -91,23 +103,33 @@ public:
         cv::Size size_cnvs(canvas_w_, canvas_h_);
 
         // ---------------------------------------------------------------------
-        // 3. Preparación de Mapas de Deformación (Warping Maps)
+        // 3. Preparación de Matrices Óptimas y Mapas de Deformación (Warping Maps)
         // ---------------------------------------------------------------------
-        // Cam 1: Solo aplica corrección de distorsión (K1, D1)
-        cv::initUndistortRectifyMap(K1_, D1_, cv::Mat(), K1_, size_cam, CV_16SC2, map1x_, map1y_);
+        // Con alpha=1.0 se preservan todos los píxeles del sensor (máximo FOV).
+        new_K1_ = cv::getOptimalNewCameraMatrix(K1_, D1_, size_cam, alpha_, size_cam);
+        new_K2_ = cv::getOptimalNewCameraMatrix(K2_, D2_, size_cam, alpha_, size_cam);
 
-        // Cam 2: Corrección de distorsión + Transformación de perspectiva (Homografía H_)
+        RCLCPP_INFO(this->get_logger(),
+            "Matrices intrínsecas óptimas (alpha=%.2f): Cam1 fx: %.2f -> %.2f | Cam2 fx: %.2f -> %.2f",
+            alpha_, K1_.at<double>(0, 0), new_K1_.at<double>(0, 0),
+            K2_.at<double>(0, 0), new_K2_.at<double>(0, 0));
+
+        // Si la homografía original fue calculada para K1 y K2 sin escalar,
+        // la adaptamos analíticamente a new_K1_ y new_K2_ sin necesidad de recalibrar:
+        if (auto_adjust_homography_) {
+            cv::Mat R_rel = K1_.inv() * H_ * K2_;
+            H_ = new_K1_ * R_rel * new_K2_.inv();
+            H_ /= H_.at<double>(2, 2);
+            RCLCPP_INFO(this->get_logger(),
+                "Homografía adaptada analíticamente para las nuevas matrices óptimas con alpha=%.2f", alpha_);
+        }
+
+        // Cam 1: Remap con new_K1_ (conserva FOV)
+        cv::initUndistortRectifyMap(K1_, D1_, cv::Mat(), new_K1_, size_cam, CV_16SC2, map1x_, map1y_);
+
+        // Cam 2: Remap con new_K2_ + Transformación de perspectiva (Homografía H_)
         cv::Mat m2x, m2y;
-        /* cv::initUndistortRectifyMap genera los mapas de deformación. Parámetros:
-         * 1. K2_      : Matriz de cámara intrínseca (Focal y Centro óptico).
-         * 2. D2_      : Coeficientes de distorsión de la lente.
-         * 3. cv::Mat(): Matriz de rectificación (Vacía porque no es estéreo estándar).
-         * 4. K2_      : Matriz de cámara objetivo (Mantenemos K2 para no escalar).
-         * 5. size_cam : Tamaño de la imagen original (640x480).
-         * 6. CV_32FC1 : Tipo de dato del mapa (Float de 32 bits, 1 canal).
-         * 7. m2x, m2y : Matrices de salida (Mapas de coordenadas X e Y).
-         */
-        cv::initUndistortRectifyMap(K2_, D2_, cv::Mat(), K2_, size_cam, CV_32FC1, m2x, m2y);
+        cv::initUndistortRectifyMap(K2_, D2_, cv::Mat(), new_K2_, size_cam, CV_32FC1, m2x, m2y);
         
         // Creación de una máscara para eliminar anomalías fuera del rango de la homografía
         cv::Mat cam_mask = cv::Mat::ones(cam_h_, cam_w_, CV_8UC1) * 255;
@@ -123,7 +145,7 @@ public:
         cv::convertMaps(m2x, m2y, map2x_, map2y_, CV_16SC2);
 
         // ---------------------------------------------------------------------
-        // 4. Cálculo del Rectángulo de Recorte Final (Bounding Box)
+        // 4. Cálculo del Rectángulo de Recorte Final sobre el Lienzo Panorámico
         // ---------------------------------------------------------------------
         cv::Mat white = cv::Mat::ones(cam_h_, cam_w_, CV_8UC1) * 255;
         cv::Mat mask1, mask2;
@@ -151,7 +173,7 @@ public:
         crop_h_ = std::max(10, bbox.height - 2 * margin_y);
 
         RCLCPP_INFO(this->get_logger(),
-            "Crop calculado → x=%d y=%d w=%d h=%d | cam2 right bound=%d",
+            "Crop calculado en lienzo → x=%d y=%d w=%d h=%d | cam2 right bound=%d",
             crop_x_, crop_y_, crop_w_, crop_h_, right_bound);
 
         // ---------------------------------------------------------------------
@@ -161,7 +183,7 @@ public:
         blend_e_ = std::max(blend_s_ + 1, std::min(overlap_end_, cam_w_));
         int bw = blend_e_ - blend_s_;
         
-        // Array pre-calculado de pesos para transición lineal (ahorra CPU en bucle)
+        // Array pre-calculado de pesos para transición lineal
         alpha_1d_.resize(bw);
         for (int x = 0; x < bw; ++x) {
             alpha_1d_[x] = static_cast<uint16_t>(std::round(256.0 - (256.0 * x / (bw - 1))));
@@ -181,16 +203,15 @@ public:
 
         rclcpp::QoS qos(5);
         qos.reliable();
-        pub_ = this->create_publisher<sensor_msgs::msg::Image>("/carrito/followme/video_frames", qos);
+        pub_ = this->create_publisher<sensor_msgs::msg::Image>(output_topic_, qos);
 
-        // CameraInfo en modo TRANSIENT_LOCAL (llega a nuevos suscriptores automáticamente)
+        // CameraInfo en modo TRANSIENT_LOCAL
         rclcpp::QoS qos_info(1);
         qos_info.reliable();
         qos_info.transient_local();
-        cam_info_pub_ = this->create_publisher<sensor_msgs::msg::CameraInfo>(
-            "/carrito/followme/camera_info", qos_info);
+        cam_info_pub_ = this->create_publisher<sensor_msgs::msg::CameraInfo>(cam_info_topic_, qos_info);
 
-        // Construye y publica el objeto CameraInfo panorámico una sola vez
+        // Construye y publica el objeto CameraInfo panorámico
         build_camera_info();
 
         swap_srv_ = this->create_service<std_srvs::srv::Trigger>(
@@ -217,92 +238,73 @@ public:
     }
 
 private:
-    // =========================================================================
-    // Variables Miembro - Organizadas Lógicamente
-    // =========================================================================
+    // Parámetros de Configuración ROS
+    int fps_;
+    int overlap_start_;
+    int overlap_end_;
+    int canvas_w_;
+    int canvas_h_;
+    int cam_w_;
+    int cam_h_;
+    int interp_;
+    int indiv_resize_w_;
+    int indiv_resize_h_;
+    int crop_x_;
+    int crop_y_;
+    int crop_w_;
+    int crop_h_;
+    int blend_s_;
+    int blend_e_;
+    double alpha_;
+    bool auto_adjust_homography_;
+    std::string output_topic_;
+    std::string cam_info_topic_;
 
-    /** @name Parámetros de Configuración ROS */
-    ///@{
-    int fps_;               ///< Tasa de captura en frames por segundo
-    int overlap_start_;     ///< Píxel X de inicio del difuminado
-    int overlap_end_;       ///< Píxel X de fin del difuminado
-    int canvas_w_;          ///< Ancho total del lienzo de trabajo matemático
-    int canvas_h_;          ///< Alto total del lienzo de trabajo matemático
-    int cam_w_;             ///< Resolución X capturada físicamente (V4L2)
-    int cam_h_;             ///< Resolución Y capturada físicamente (V4L2)
-    int interp_;            ///< Modo de interpolación CV
-    int indiv_resize_w_;    ///< Escala X para las publicaciones individuales
-    int indiv_resize_h_;    ///< Escala Y para las publicaciones individuales
-    int crop_x_;            ///< X inicial del rectángulo útil sin bordes negros
-    int crop_y_;            ///< Y inicial del rectángulo útil sin bordes negros
-    int crop_w_;            ///< Ancho de la panorámica resultante y publicada
-    int crop_h_;            ///< Alto de la panorámica resultante y publicada
-    int blend_s_;           ///< Variable auxiliar (inicio real de mezcla)
-    int blend_e_;           ///< Variable auxiliar (fin real de mezcla)
-    ///@}
+    // Variables Matemáticas y de Calibración
+    cv::Mat K1_, D1_;
+    cv::Mat K2_, D2_;
+    cv::Mat new_K1_, new_K2_;
+    cv::Mat H_;
+    cv::Mat map1x_, map1y_;
+    cv::Mat map2x_, map2y_;
+    std::vector<uint16_t> alpha_1d_;
 
-    /** @name Variables Matemáticas y de Calibración */
-    ///@{
-    cv::Mat K1_, D1_;       ///< Matriz intrínseca y de distorsión (Cámara 1)
-    cv::Mat K2_, D2_;       ///< Matriz intrínseca y de distorsión (Cámara 2)
-    cv::Mat H_;             ///< Matriz de homografía entre ambas perspectivas
-    cv::Mat map1x_, map1y_; ///< Array de desplazamientos en X/Y para remap de Cam 1
-    cv::Mat map2x_, map2y_; ///< Array de desplazamientos en X/Y para remap de Cam 2
-    std::vector<uint16_t> alpha_1d_; ///< Tabla de búsqueda rápida para difuminado
-    ///@}
+    // Memoria de Trabajo
+    cv::Mat out1_req_;
+    cv::Mat out2_req_;
+    cv::Mat canvas_;
+    cv::Rect req1_;
+    cv::Rect req2_;
 
-    /** @name Memoria de Trabajo (Para evitar re-allocations continuos) */
-    ///@{
-    cv::Mat out1_req_;      ///< Fragmento mapeado de la cámara 1
-    cv::Mat out2_req_;      ///< Fragmento mapeado de la cámara 2
-    cv::Mat canvas_;        ///< Lienzo grande donde se escribe la composición
-    cv::Rect req1_;         ///< ROI activo de la cámara 1
-    cv::Rect req2_;         ///< ROI activo de la cámara 2
-    ///@}
-
-    /**
-     * @struct Camera
-     * @brief Contexto de ejecución y hardware de una cámara individual.
-     */
     struct Camera {
-        int id;                                         ///< Índice hardware /dev/videoX
-        std::string name;                               ///< Identificador lógico ("cam_1", etc.)
-        std::unique_ptr<cv::VideoCapture> cap;          ///< Interfaz de captura de OpenCV
-        rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub; ///< Publicador topic individual
-        cv::Mat latest_frame;                           ///< Última imagen extraída
-        std::mutex frame_mutex;                         ///< Cerrojo para acceso concurrente al frame
+        int id;
+        std::string name;
+        std::unique_ptr<cv::VideoCapture> cap;
+        rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub;
+        cv::Mat latest_frame;
+        std::mutex frame_mutex;
         std::chrono::high_resolution_clock::time_point last_pub_time;
         std::chrono::high_resolution_clock::time_point last_log_time;
-        std::atomic<bool> is_fresh{false};              ///< Avisa si el fotograma ya fue procesado
+        std::atomic<bool> is_fresh{false};
     };
 
-    /** @name Hilos y Sincronización Hardware-Software */
-    ///@{
-    std::atomic<bool> running_;                         ///< Flag global de ejecución limpia
-    std::vector<std::shared_ptr<Camera>> cameras_;      ///< Arreglo de cámaras instanciadas
-    std::vector<std::thread> capture_threads_;          ///< Pool de hilos de lectura USB
-    std::thread fusion_thread_;                         ///< Hilo trabajador central de fusión
-    std::mutex fusion_mutex_;                           ///< Cerrojo del ciclo principal
-    std::condition_variable fusion_cv_;                 ///< Variable de condición (despertador de fusión)
-    bool new_frame_ready_ = false;                      ///< Marca para la condición de despertar
-    ///@}
+    std::atomic<bool> running_;
+    std::vector<std::shared_ptr<Camera>> cameras_;
+    std::vector<std::thread> capture_threads_;
+    std::thread fusion_thread_;
+    std::mutex fusion_mutex_;
+    std::condition_variable fusion_cv_;
+    bool new_frame_ready_ = false;
 
-    /** @name Elementos Centrales ROS 2 */
-    ///@{
-    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_;                 ///< Topic: video_frames (Panorámico)
-    rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr cam_info_pub_;   ///< Topic: camera_info (Metadatos 3D)
-    sensor_msgs::msg::CameraInfo cam_info_msg_;                                 ///< Caché del CameraInfo
-    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr swap_srv_;               ///< Servicio: swap_cameras
-    ///@}
-
-    // =========================================================================
-    // Métodos Básicos y Callbacks
-    // =========================================================================
+    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr pub_;
+    rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr cam_info_pub_;
+    sensor_msgs::msg::CameraInfo cam_info_msg_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr swap_srv_;
 
     /**
      * @brief Genera el modelo matemático 3D final (CameraInfo) de la panorámica resultante.
-     * @details Se basa en la cámara 1 (undistorsionada) desplazando el centro óptico
-     * por las coordenadas de recorte aplicadas al lienzo.
+     * @details Se basa en new_K1_ desplazando el centro óptico por las coordenadas de recorte
+     *          aplicadas al lienzo.
      */
     void build_camera_info()
     {
@@ -311,48 +313,30 @@ private:
         cam_info_msg_.height = static_cast<uint32_t>(crop_h_);
         cam_info_msg_.distortion_model = "plumb_bob";
 
-        // K1_ = [fx, 0, cx; 0, fy, cy; 0, 0, 1]  (CV_64F)
-        double fx = K1_.at<double>(0, 0);
-        double fy = K1_.at<double>(1, 1);
-        // El centro óptico se desplaza restando el offset del recorte (crop)
-        double cx = K1_.at<double>(0, 2) - static_cast<double>(crop_x_);
-        double cy = K1_.at<double>(1, 2) - static_cast<double>(crop_y_);
+        double fx = new_K1_.at<double>(0, 0);
+        double fy = new_K1_.at<double>(1, 1);
+        double cx = new_K1_.at<double>(0, 2) - static_cast<double>(crop_x_);
+        double cy = new_K1_.at<double>(1, 2) - static_cast<double>(crop_y_);
 
-        // D = ceros (porque la imagen de salida es perfecta y ortogonal)
         cam_info_msg_.d = {0.0, 0.0, 0.0, 0.0, 0.0};
-
-        // K (3x3 row-major)
-        cam_info_msg_.k = {
-            fx,  0.0,  cx,
-            0.0,  fy,  cy,
-            0.0, 0.0, 1.0
-        };
-
-        // R = identidad (sin rotación extra)
-        cam_info_msg_.r = {
-            1.0, 0.0, 0.0,
-            0.0, 1.0, 0.0,
-            0.0, 0.0, 1.0
-        };
-
-        // P (3x4 row-major, sin traslación estéreo)
-        cam_info_msg_.p = {
-            fx,  0.0,  cx, 0.0,
-            0.0,  fy,  cy, 0.0,
-            0.0, 0.0, 1.0, 0.0
-        };
+        cam_info_msg_.k = { fx,  0.0,  cx,
+                             0.0,  fy,  cy,
+                             0.0, 0.0, 1.0 };
+        cam_info_msg_.r = { 1.0, 0.0, 0.0,
+                             0.0, 1.0, 0.0,
+                             0.0, 0.0, 1.0 };
+        cam_info_msg_.p = { fx,  0.0,  cx, 0.0,
+                             0.0,  fy,  cy, 0.0,
+                             0.0, 0.0, 1.0, 0.0 };
 
         cam_info_msg_.header.stamp = this->now();
         cam_info_pub_->publish(cam_info_msg_);
 
         RCLCPP_INFO(this->get_logger(),
-            "CameraInfo panorámica: %dx%d | fx=%.2f fy=%.2f cx=%.2f cy=%.2f",
-            crop_w_, crop_h_, fx, fy, cx, cy);
+            "CameraInfo panorámica (alpha=%.2f): %dx%d | fx=%.2f fy=%.2f cx=%.2f cy=%.2f",
+            alpha_, crop_w_, crop_h_, fx, fy, cx, cy);
     }
 
-    /**
-     * @brief Callback del servicio Trigger. Intercambia lógicamente las cámaras si están cruzadas físicamente.
-     */
     bool swap_cameras_callback(const std::shared_ptr<std_srvs::srv::Trigger::Request> req,
                                std::shared_ptr<std_srvs::srv::Trigger::Response> res)
     {
@@ -361,18 +345,15 @@ private:
         if (cameras_.size() >= 2) {
             std::swap(cameras_[0], cameras_[1]);
             res->success = true;
-            res->message = "Camaras intercambiadas correctamente.";
-            RCLCPP_INFO(this->get_logger(), "Camaras intercambiadas por servicio GUI.");
+            res->message = "Cámaras intercambiadas correctamente.";
+            RCLCPP_INFO(this->get_logger(), "Cámaras intercambiadas por servicio GUI.");
         } else {
             res->success = false;
-            res->message = "No hay suficientes camaras conectadas.";
+            res->message = "No hay suficientes cámaras conectadas.";
         }
         return true;
     }
 
-    /**
-     * @brief Carga intrínsecos de OpenCV desde YAML. Si falla, usa Identidad y Ceros.
-     */
     void load_intrinsics(const std::string& path, cv::Mat& K, cv::Mat& D) {
         try {
             YAML::Node config = YAML::LoadFile(path);
@@ -387,9 +368,6 @@ private:
         }
     }
 
-    /**
-     * @brief Carga Homografía desde YAML. Si falla, usa Identidad (fusión plana errónea).
-     */
     void load_homography(const std::string& path, cv::Mat& H) {
         try {
             YAML::Node config = YAML::LoadFile(path);
@@ -397,13 +375,10 @@ private:
             H = cv::Mat(3, 3, CV_64F, h_data.data()).clone();
         } catch (const std::exception&) {
             H = cv::Mat::eye(3, 3, CV_64F);
-            RCLCPP_WARN(this->get_logger(), "No se pudo cargar homografia. Usando identidad.");
+            RCLCPP_WARN(this->get_logger(), "No se pudo cargar homografía. Usando identidad.");
         }
     }
 
-    /**
-     * @brief Consulta el nombre del hardware USB en Linux para detectar webcams integradas.
-     */
     std::string get_camera_name(int index) {
         std::ifstream file("/sys/class/video4linux/video" + std::to_string(index) + "/name");
         std::string name;
@@ -413,21 +388,13 @@ private:
         return name;
     }
 
-    // =========================================================================
-    // Core Engine (Subprocesos de captura y procesado)
-    // =========================================================================
-
-    /**
-     * @brief Escanea buses USB y asigna 1 hilo exclusivo por cada cámara encontrada.
-     */
     void discover_cameras()
     {
         int cam_idx = 1;
         for (int i = 0; i < 10; ++i) {
-            if (cam_idx > 2) break; // Límite lógico de 2 cámaras (panorámica binocular)
+            if (cam_idx > 2) break;
 
             std::string hw_name = get_camera_name(i);
-            // Salta cámaras inútiles como las de ordenadores portátiles de desarrollo
             if (hw_name.find("Integrated") != std::string::npos || hw_name.empty()) {
                 continue; 
             }
@@ -439,11 +406,10 @@ private:
             cap->set(cv::CAP_PROP_FRAME_WIDTH,  cam_w_);
             cap->set(cv::CAP_PROP_FRAME_HEIGHT, cam_h_);
             cap->set(cv::CAP_PROP_FPS,          fps_);
-            cap->set(cv::CAP_PROP_BUFFERSIZE, 1); // Evitar retención / latencia
+            cap->set(cv::CAP_PROP_BUFFERSIZE, 1);
 
             cv::Mat frame;
             bool valid = false;
-            // Calentamiento del sensor y validación real de los píxeles
             for (int j = 0; j < 5; ++j) {
                 if (cap->read(frame) && !frame.empty()) {
                     cv::Scalar s = cv::sum(frame);
@@ -478,7 +444,7 @@ private:
         if (cameras_.size() == 0) {
             RCLCPP_ERROR(this->get_logger(), "No se encontraron cámaras válidas.");
         } else if (cameras_.size() == 1) {
-            RCLCPP_INFO(this->get_logger(), "[Modo 1 cámara] Iniciando publicación directa con undistort.");
+            RCLCPP_INFO(this->get_logger(), "[Modo 1 cámara] Publicación directa con undistort (alpha=%.2f).", alpha_);
             build_camera_info_single();
             fusion_thread_ = std::thread(&PanoramicFusionCppNode::single_cam_worker, this);
         } else {
@@ -486,31 +452,24 @@ private:
                 std::swap(cameras_[0], cameras_[1]);
                 RCLCPP_INFO(this->get_logger(), "Cámaras intercambiadas automáticamente (swap_default=true).");
             }
-            RCLCPP_INFO(this->get_logger(), "[Modo 2 cámaras] Iniciando fusión panorámica (Hardware-Synced).");
+            RCLCPP_INFO(this->get_logger(), "[Modo 2 cámaras] Fusión panorámica (alpha=%.2f, Hardware-Synced).", alpha_);
             fusion_thread_ = std::thread(&PanoramicFusionCppNode::fusion_worker, this);
         }
     }
 
-    /**
-     * @brief Tarea asíncrona dedicada por hardware a arrancar imágenes del bus USB.
-     * @param cam Puntero inteligente al contexto de la cámara asignada a este hilo.
-     */
     void capture_thread_func(std::shared_ptr<Camera> cam)
     {
         cv::Mat raw_frame;
         while (running_ && rclcpp::ok()) {
-            // grab() extrae velozmente del buffer hardware sin decodificar JPEG
             if (!cam->cap->grab()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 continue;
             }
 
-            // retrieve() ejecuta la decodificación costosa
             if (!cam->cap->retrieve(raw_frame) || raw_frame.empty()) {
                 continue;
             }
 
-            // Copia profunda local: evitamos que la fusión congele al hilo USB
             cv::Mat new_frame = raw_frame.clone();
 
             {
@@ -519,7 +478,6 @@ private:
             }
             cam->is_fresh = true;
 
-            // Trigger Zero-Delay: La Cam 1 (Maestra) patea instantáneamente al hilo fusionador
             if (cam == cameras_[0]) {
                 {
                     std::lock_guard<std::mutex> lock(fusion_mutex_);
@@ -531,14 +489,10 @@ private:
         cam->cap->release();
     }
 
-    /**
-     * @brief Prepara el mensaje de imagen individual y lo publica para el sistema secundario.
-     */
     void publish_camera(std::shared_ptr<Camera> cam, const cv::Mat& raw_frame) {
         auto now = std::chrono::high_resolution_clock::now();
         if (cam->last_pub_time.time_since_epoch().count() > 0) {
             auto diff = std::chrono::duration<double, std::milli>(now - cam->last_pub_time).count();
-            
             auto time_since_log = std::chrono::duration<double, std::milli>(now - cam->last_log_time).count();
             if (time_since_log >= 500.0) {
                 RCLCPP_INFO(this->get_logger(), "[%s] Publish interval: %.2f ms", cam->name.c_str(), diff);
@@ -552,7 +506,7 @@ private:
            (indiv_resize_w_ != raw_frame.cols || indiv_resize_h_ != raw_frame.rows)) {
             cv::resize(raw_frame, frame, cv::Size(indiv_resize_w_, indiv_resize_h_), 0, 0, cv::INTER_LINEAR);
         } else {
-            frame = raw_frame; // Zero-copy refcount increment
+            frame = raw_frame;
         }
 
         auto msg = std::make_unique<sensor_msgs::msg::Image>();
@@ -571,9 +525,6 @@ private:
         cam->pub->publish(std::move(msg));
     }
 
-    /**
-     * @brief Tarea que permanece bloqueada hasta que la cámara maestra la despierta.
-     */
     void fusion_worker() {
         while (running_ && rclcpp::ok()) {
             std::unique_lock<std::mutex> lock(fusion_mutex_);
@@ -586,16 +537,10 @@ private:
         }
     }
 
-    /**
-     * @brief Tarea para modo cámara única: aplica undistort y publica directamente en el topic panorámico.
-     * @details Reutiliza el mismo mecanismo de condition_variable que el modo dual para despertar
-     *          en cada fotograma nuevo, pero no aplica homografía ni alpha blending.
-     */
     void single_cam_worker()
     {
         cv::Mat undistorted;
         while (running_ && rclcpp::ok()) {
-            // Espera al trigger del capture_thread de la única cámara
             std::unique_lock<std::mutex> lock(fusion_mutex_);
             fusion_cv_.wait(lock, [this]() { return new_frame_ready_ || !running_; });
             if (!running_) break;
@@ -606,18 +551,13 @@ private:
             {
                 std::lock_guard<std::mutex> lock1(cameras_[0]->frame_mutex);
                 if (cameras_[0]->latest_frame.empty()) continue;
-                frame = cameras_[0]->latest_frame; // Referencia O(1), sin clone
+                frame = cameras_[0]->latest_frame;
             }
             cameras_[0]->is_fresh.exchange(false);
 
-            // Undistort con los mapas ya precalculados de K1/D1 (sin homografía, sin blending)
             cv::remap(frame, undistorted, map1x_, map1y_, interp_);
-
-            // Publica feed individual de la cámara (para grabación, SLAM, etc.)
             publish_camera(cameras_[0], frame);
 
-            // Publica en el topic panorámico unificado para que el resto del sistema
-            // no distinga si hay 1 o 2 cámaras
             auto out_msg            = std::make_unique<sensor_msgs::msg::Image>();
             auto stamp              = this->now();
             out_msg->header.stamp   = stamp;
@@ -636,17 +576,12 @@ private:
         }
     }
 
-    /**
-     * @brief Construye y publica el CameraInfo para el modo de cámara única.
-     * @details Usa K1_ directamente, sin offset de recorte de fusión. La imagen
-     *          de salida es cam_w_ x cam_h_ (dimensiones reales de captura undistorsionada).
-     */
     void build_camera_info_single()
     {
-        double fx = K1_.at<double>(0, 0);
-        double fy = K1_.at<double>(1, 1);
-        double cx = K1_.at<double>(0, 2);
-        double cy = K1_.at<double>(1, 2);
+        double fx = new_K1_.at<double>(0, 0);
+        double fy = new_K1_.at<double>(1, 1);
+        double cx = new_K1_.at<double>(0, 2);
+        double cy = new_K1_.at<double>(1, 2);
 
         cam_info_msg_.header.frame_id  = "panoramic_link";
         cam_info_msg_.width            = static_cast<uint32_t>(cam_w_);
@@ -670,9 +605,6 @@ private:
             cam_w_, cam_h_, fx, fy, cx, cy);
     }
 
-    /**
-     * @brief Consigue los últimos fotogramas con O(1) locks y coordina la lógica de fusión general.
-     */
     void do_fusion()
     {
         if (cameras_.size() < 2) return;
@@ -681,7 +613,7 @@ private:
         {
             std::lock_guard<std::mutex> lock1(cameras_[0]->frame_mutex);
             if (cameras_[0]->latest_frame.empty()) return;
-            frame1 = cameras_[0]->latest_frame; // Referencia rápida O(1) (Sin clone)
+            frame1 = cameras_[0]->latest_frame;
         }
         {
             std::lock_guard<std::mutex> lock2(cameras_[1]->frame_mutex);
@@ -689,44 +621,31 @@ private:
             frame2 = cameras_[1]->latest_frame;
         }
 
-        bool fresh1 = cameras_[0]->is_fresh.exchange(false);
-        bool fresh2 = cameras_[1]->is_fresh.exchange(false);
+        cameras_[0]->is_fresh.exchange(false);
+        cameras_[1]->is_fresh.exchange(false);
 
-        // Alerta si los hilos USB no logran entregar fotogramas a la misma velocidad
-        // if (!fresh1 || !fresh2) {
-        //     RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 500, 
-        //         "TIRÓN DETECTADO: Usando frame repetido (cam_1 fresh: %d, cam_2 fresh: %d)", fresh1, fresh2);
-        // }
-
-        // Publica feeds sin fusionar para componentes como SLAM o grabación
         publish_camera(cameras_[0], frame1);
         publish_camera(cameras_[1], frame2);
         
         fuse(frame1, frame2);
     }
 
-    /**
-     * @brief Algoritmo matemático final: Mapea (deforma), copia, difumina, recorta y envía por red.
-     */
     void fuse(const cv::Mat& cv_ptr1, const cv::Mat& cv_ptr2) {
         try {
             auto start_fuse = std::chrono::high_resolution_clock::now();
             
-            // 1. Spatial Transformation (Remap)
-            // Se realiza SOLO en las regiones ROI matemáticamente necesarias (gran ahorro de CPU)
+            // 1. Spatial Transformation (Remap) con matrices óptimas que retienen el FOV
             cv::remap(cv_ptr1, out1_req_, map1x_(req1_), map1y_(req1_), interp_);
             cv::remap(cv_ptr2, out2_req_, map2x_(req2_), map2y_(req2_), interp_);
 
-            // 2. Copia directa de memoria
-            // Pega las zonas que no solapan (Cámara 1 a la izquierda, Cámara 2 a la derecha)
+            // 2. Copia directa de memoria de zonas no solapadas
             int bw = blend_e_ - blend_s_;
             out1_req_(cv::Rect(0, 0, blend_s_, cam_h_)).copyTo(canvas_(cv::Rect(0, 0, blend_s_, cam_h_)));
             
             int e_w = canvas_w_ - blend_e_;
             out2_req_(cv::Rect(bw, 0, e_w, canvas_h_)).copyTo(canvas_(cv::Rect(blend_e_, 0, e_w, canvas_h_)));
 
-            // 3. CPU Cache-friendly Alpha Blending
-            // Mezcla las zonas centrales usando un degradado (Transición suave sin bordes feos)
+            // 3. CPU Cache-friendly Alpha Blending en la zona de solape
             cv::Mat blend1 = out1_req_(cv::Rect(blend_s_, 0, bw, cam_h_));
             cv::Mat blend2 = out2_req_(cv::Rect(0, 0, bw, canvas_h_));
             cv::Mat blend_dst = canvas_(cv::Rect(blend_s_, 0, bw, cam_h_));
@@ -740,15 +659,13 @@ private:
                     uint16_t a2 = 256 - a1;
                     int idx = x * 3;
                     
-                    // Sustitución de división (/256) por barrido de bits (>> 8) por optimización extrema
                     pdst[idx]   = (p1[idx]   * a1 + p2[idx]   * a2) >> 8;
                     pdst[idx+1] = (p1[idx+1] * a1 + p2[idx+1] * a2) >> 8;
                     pdst[idx+2] = (p1[idx+2] * a1 + p2[idx+2] * a2) >> 8;
                 }
             }
 
-            // 4. Recorte de márgenes
-            // Se aísla y recorta la zona con información válida, ignorando huecos negros laterales
+            // 4. Recorte final de márgenes útiles sobre el lienzo panorámico combinado
             cv::Mat cropped = canvas_(cv::Rect(crop_x_, crop_y_, crop_w_, crop_h_));
             
             // 5. Encapsulación y Publicación (ROS 2 Serializer)
@@ -768,7 +685,6 @@ private:
             auto start_pub = std::chrono::high_resolution_clock::now();
             auto stamp = this->now();
             
-            // Disparo sincrónico de ambos mensajes al bus ROS
             out_msg->header.stamp = stamp;
             pub_->publish(std::move(out_msg));
 
@@ -776,12 +692,11 @@ private:
             cam_info_pub_->publish(cam_info_msg_);
 
             auto end_pub = std::chrono::high_resolution_clock::now();
-
             auto duration_fuse = std::chrono::duration<double, std::milli>(start_pub - start_fuse).count();
             auto duration_pub = std::chrono::duration<double, std::milli>(end_pub - start_pub).count();
             
             RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 500, 
-                "Fuse took: %.2f ms | Publish took: %.2f ms", duration_fuse, duration_pub);
+                "Fuse took: %.2f ms | Publish took: %.2f ms | Size: %dx%d", duration_fuse, duration_pub, cropped.cols, cropped.rows);
 
         } catch (const std::exception& e) {
             RCLCPP_ERROR(this->get_logger(), "Excepción en fusión: %s", e.what());
@@ -796,8 +711,6 @@ int main(int argc, char** argv)
 {
     rclcpp::init(argc, argv);
     rclcpp::NodeOptions options;
-    
-    // Configuración obligatoria para lograr el Zero-Copy si alguien se suscribe intra-proceso
     options.use_intra_process_comms(true);
     
     auto node = std::make_shared<PanoramicFusionCppNode>(options);
